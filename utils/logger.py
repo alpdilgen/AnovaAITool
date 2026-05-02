@@ -1,1 +1,67 @@
+"""
+Transaction Logger for translation workflow logging
+"""
 
+from datetime import datetime
+from typing import List, Dict
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class TransactionLogger:
+    """Logger with segment, context, and response tracking"""
+
+    def __init__(self):
+        self.logs = []
+        self.start_time = datetime.now()
+
+    def log(self, message: str):
+        """Add timestamped log entry"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"{timestamp} | {message}"
+        self.logs.append(entry)
+        logger.info(message)
+
+    def log_tm_matches(self, tm_context: Dict[str, List]):
+        """Log TM matches found"""
+        if not tm_context:
+            self.log("TM Context: No matches found")
+            return
+
+        total_matches = sum(len(matches) for matches in tm_context.values() if matches)
+        segments_with_matches = len([m for m in tm_context.values() if m])
+        self.log(f"TM Context: {total_matches} matches across {segments_with_matches} segments")
+
+        for seg_id, matches in tm_context.items():
+            if matches:
+                match_str = ", ".join([f"[{m.similarity}%]" for m in matches[:3]])
+                self.log(f"  [{seg_id}] {match_str}")
+
+    def log_tb_matches(self, tb_context: Dict[str, List]):
+        """Log TB matches found"""
+        if not tb_context:
+            self.log("TB Context: No terminology found")
+            return
+
+        total_terms = sum(len(terms) for terms in tb_context.values() if terms)
+        segments_with_terms = len([t for t in tb_context.values() if t])
+        self.log(f"TB Context: {total_terms} terms across {segments_with_terms} segments")
+
+        for seg_id, terms in tb_context.items():
+            if terms:
+                term_str = ", ".join([f"{t.source}={t.target}" for t in terms[:3]])
+                self.log(f"  [{seg_id}] {term_str}")
+
+    def log_batch_start(self, batch_num: int, batch: List):
+        """Log batch processing start"""
+        self.log(f"Batch {batch_num}: {len(batch)} segments to LLM")
+
+    def log_llm_interaction(self, prompt: str, response: str):
+        """Log full LLM interaction (for detailed analysis)"""
+        self.log(f"LLM Prompt length: {len(prompt)} chars")
+        self.log(f"LLM Response length: {len(response)} chars")
+
+    def get_content(self) -> str:
+        """Get all log content as string"""
+        return "\n".join(self.logs)
