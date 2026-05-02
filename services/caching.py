@@ -1,0 +1,64 @@
+import hashlib
+from pathlib import Path
+from typing import List, Dict, Optional
+
+
+class CacheManager:
+    """
+    Cache manager for TM disk cache (used by sidebar cache info/clear UI).
+    """
+
+    CACHE_DIR = Path("cache")
+
+    @classmethod
+    def _ensure_cache_dir(cls):
+        """Create cache directory if it doesn't exist"""
+        cls.CACHE_DIR.mkdir(exist_ok=True)
+
+    @staticmethod
+    def _compute_file_hash(content: bytes) -> str:
+        """Compute MD5 hash of file content"""
+        return hashlib.md5(content).hexdigest()
+
+    @staticmethod
+    def _get_cache_path(file_hash: str) -> Path:
+        """Get pickle cache file path for given hash"""
+        return CacheManager.CACHE_DIR / f"tm_cache_{file_hash}.pkl"
+
+    @classmethod
+    def clear_tm_cache(cls, file_hash: Optional[str] = None):
+        """
+        Clear TM cache files.
+        If file_hash provided, clear only that cache.
+        Otherwise, clear all TM caches.
+        """
+        cls._ensure_cache_dir()
+
+        if file_hash:
+            cache_path = cls._get_cache_path(file_hash)
+            if cache_path.exists():
+                cache_path.unlink()
+                return True
+            return False
+        else:
+            count = 0
+            for cache_file in cls.CACHE_DIR.glob("tm_cache_*.pkl"):
+                cache_file.unlink()
+                count += 1
+            return count
+
+    @classmethod
+    def get_cache_info(cls) -> List[Dict]:
+        """Get information about cached TM files"""
+        cls._ensure_cache_dir()
+        cache_files = []
+
+        for cache_file in cls.CACHE_DIR.glob("tm_cache_*.pkl"):
+            stat = cache_file.stat()
+            cache_files.append({
+                'file': cache_file.name,
+                'size_mb': stat.st_size / (1024 * 1024),
+                'modified': stat.st_mtime
+            })
+
+        return cache_files
