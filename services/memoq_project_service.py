@@ -6,7 +6,7 @@ Wraps the WSAPI ServerProjectService and FileManagerService for:
   - Listing translation documents in a project
   - Exporting bilingual (.mqxlz, unzipped to .mqxliff bytes)
   - Re-importing a corrected bilingual XLIFF via
-    ImportBilingualTranslationDocument(projectGuid, fileGuid, XLIFF, targetLangCodes)
+    UpdateTranslationDocumentFromBilingual(projectGuid, fileGuid, XLIFF)
   - Discovering the TM and TB GUIDs assigned to a project (REST helper)
 
 Authentication
@@ -21,7 +21,7 @@ Bilingual round-trip (proven live, v1.10 -> v1.12)
 2. unzip in-memory -> document.mqxliff
 3. (caller modifies the XLIFF, e.g. translation results, Verifika fixes)
 4. BeginChunkedFileUpload + AddNextFileChunk + EndChunkedFileUpload -> uploadFileGuid
-5. ImportBilingualTranslationDocument(projectGuid, uploadFileGuid, XLIFF, targetLangCodes)
+5. UpdateTranslationDocumentFromBilingual(projectGuid, uploadFileGuid, XLIFF)
 """
 
 from __future__ import annotations
@@ -535,47 +535,33 @@ class MemoQProjectService:
         document_guid: str,
         xliff_bytes: bytes,
         filename: str = "translated.mqxliff",
-        target_lang_codes: Optional[List[str]] = None,
     ) -> Optional[int]:
         """
-        Push a corrected XLIFF back into the project document via
-        ImportBilingualTranslationDocument (the correct WSDL method).
-        Returns the new document version number (if available), else None.
+        Push a corrected XLIFF back into the existing project document via
+        UpdateTranslationDocumentFromBilingual. The document is identified by
+        the GUID embedded inside the bilingual file — no docGuid needed at the
+        SOAP level.
 
-        WSDL signature:
-          ImportBilingualTranslationDocument(
+        WSDL signature (verified from offline docs v12.2.40 Reference.cs):
+          UpdateTranslationDocumentFromBilingual(
               Guid serverProjectGuid,
-              Guid fileGuid,
-              BilingualDocFormat docFormat,   -- "XLIFF"
-              string[] targetLangCodes)
+              Guid fileGuid,             ← GUID from BeginChunkedFileUpload
+              BilingualDocFormat docFormat)
+        Returns TranslationDocImportResultInfo[].
         """
-        # Resolve target lang codes from the document list if not supplied
-        if not target_lang_codes:
-            try:
-                docs = self.list_documents(project_guid)
-                for d in docs:
-                    if str(d.get("DocumentGuid")) == str(document_guid):
-                        tlc = d.get("TargetLangCode")
-                        if tlc:
-                            target_lang_codes = [tlc]
-                        break
-            except Exception as e:
-                logger.warning("Could not resolve target lang codes for import: %s", e)
-
         upload_guid = self._upload_file(xliff_bytes, filename=filename)
 
         try:
-            result = self._project_client.service.ImportBilingualTranslationDocument(
+            result = self._project_client.service.UpdateTranslationDocumentFromBilingual(
                 serverProjectGuid=project_guid,
                 fileGuid=upload_guid,
                 docFormat="XLIFF",
-                targetLangCodes=target_lang_codes or [],
                 _soapheaders=self._hdr(),
             )
-            logger.info("ImportBilingualTranslationDocument succeeded: %r", result)
+            logger.info("UpdateTranslationDocumentFromBilingual succeeded: %r", result)
         except Exception as e:
             raise RuntimeError(
-                f"ImportBilingualTranslationDocument failed: {e}"
+                f"UpdateTranslationDocumentFromBilingual failed: {e}"
             ) from e
 
         # Read back the new version number
