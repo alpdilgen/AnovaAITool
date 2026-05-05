@@ -323,7 +323,7 @@ class MemoQServerClient:
             "Options": {
                 "MatchThreshold": match_threshold,
                 "AdjustFuzzyMatches": False,
-                "InlineTagStrictness": 2,
+                "InlineTagStrictness": 0,
                 "OnlyBest": False,
                 "OnlyUnambiguous": False,
                 "ShowFragmentHits": False,
