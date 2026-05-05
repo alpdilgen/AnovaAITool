@@ -84,9 +84,17 @@ def _extract_guid(value: Any) -> Optional[str]:
     if value is None:
         return None
 
+    _NULL_UUID = "00000000-0000-0000-0000-000000000000"
+
+    def _valid(s: str) -> Optional[str]:
+        s = s.strip()
+        if _GUID_RE.match(s) and s.lower() != _NULL_UUID:
+            return s
+        return None
+
     # Plain string GUID
-    if isinstance(value, str) and _GUID_RE.match(value.strip()):
-        return value.strip()
+    if isinstance(value, str):
+        return _valid(value)
 
     # Check well-known field names first (most specific)
     for field in (
@@ -95,9 +103,9 @@ def _extract_guid(value: Any) -> Optional[str]:
     ):
         v = getattr(value, field, None)
         if v is not None:
-            s = str(v).strip()
-            if _GUID_RE.match(s):
-                return s
+            result = _valid(str(v))
+            if result:
+                return result
 
     # Scan all attributes for anything matching UUID format
     try:
@@ -111,8 +119,9 @@ def _extract_guid(value: Any) -> Optional[str]:
             if callable(v):
                 continue
             s = str(v).strip() if v is not None else ""
-            if _GUID_RE.match(s):
-                return s
+            result = _valid(s)
+            if result:
+                return result
     except Exception:
         pass
 
@@ -341,6 +350,7 @@ class MemoQProjectService:
             _collect(res)
         except Exception as e:
             last_error = e
+            logger.warning("list_documents strategy 0 (ListProjectTranslationDocuments) failed: %s", e)
 
         # Strategy 0b — "2" variant, no extra args
         if not results_by_guid:
@@ -351,6 +361,7 @@ class MemoQProjectService:
                 _collect(res)
             except Exception as e:
                 last_error = e
+                logger.warning("list_documents strategy 0b (ListProjectTranslationDocuments2) failed: %s", e)
 
         # Strategy A — per target language with various kwarg spellings
         if not results_by_guid:
@@ -445,24 +456,58 @@ class MemoQProjectService:
             'IncludeFullVersionHistory': False,
         }
 
-        # Strategy 1: dedicated XLIFF bilingual export — docGuid
+        # Strategy 1: XliffBilingual, docGuid, NO options (zeep can't always serialize dict to complex type)
         try:
             raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
                 serverProjectGuid=project_guid,
                 docGuid=document_guid,
-                exportOptions=xliff_opts,
                 _soapheaders=self._hdr(),
             )
             file_guid = _extract_guid(raw)
             if file_guid is None:
-                logger.debug("export strategy 1: result has no GUID — raw=%r", raw)
+                logger.warning("export strategy 1: no valid GUID in response — raw=%r", raw)
             else:
-                logger.info("export strategy 1 (XliffBilingual, docGuid) succeeded")
+                logger.info("export strategy 1 (XliffBilingual, docGuid, no-opts) succeeded")
         except Exception as e:
             last_err = e
-            logger.debug("export strategy 1 (XliffBilingual, docGuid) failed: %s", e)
+            logger.warning("export strategy 1 (XliffBilingual, docGuid, no-opts) failed: %s", e)
 
-        # Strategy 2: dedicated XLIFF bilingual export — documentGuid (alt param name)
+        # Strategy 2: XliffBilingual, documentGuid, NO options
+        if file_guid is None:
+            try:
+                raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
+                    serverProjectGuid=project_guid,
+                    documentGuid=document_guid,
+                    _soapheaders=self._hdr(),
+                )
+                file_guid = _extract_guid(raw)
+                if file_guid is None:
+                    logger.warning("export strategy 2: no valid GUID in response — raw=%r", raw)
+                else:
+                    logger.info("export strategy 2 (XliffBilingual, documentGuid, no-opts) succeeded")
+            except Exception as e:
+                last_err = e
+                logger.warning("export strategy 2 (XliffBilingual, documentGuid, no-opts) failed: %s", e)
+
+        # Strategy 3: XliffBilingual, docGuid, WITH options dict
+        if file_guid is None:
+            try:
+                raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
+                    serverProjectGuid=project_guid,
+                    docGuid=document_guid,
+                    exportOptions=xliff_opts,
+                    _soapheaders=self._hdr(),
+                )
+                file_guid = _extract_guid(raw)
+                if file_guid is None:
+                    logger.warning("export strategy 3: no valid GUID in response — raw=%r", raw)
+                else:
+                    logger.info("export strategy 3 (XliffBilingual, docGuid, with-opts) succeeded")
+            except Exception as e:
+                last_err = e
+                logger.warning("export strategy 3 (XliffBilingual, docGuid, with-opts) failed: %s", e)
+
+        # Strategy 4: XliffBilingual, documentGuid, WITH options dict
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
@@ -473,14 +518,14 @@ class MemoQProjectService:
                 )
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
-                    logger.debug("export strategy 2: result has no GUID — raw=%r", raw)
+                    logger.warning("export strategy 4: no valid GUID in response — raw=%r", raw)
                 else:
-                    logger.info("export strategy 2 (XliffBilingual, documentGuid) succeeded")
+                    logger.info("export strategy 4 (XliffBilingual, documentGuid, with-opts) succeeded")
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 2 (XliffBilingual, documentGuid) failed: %s", e)
+                logger.warning("export strategy 4 (XliffBilingual, documentGuid, with-opts) failed: %s", e)
 
-        # Strategy 3: generic export — docGuid, no options (server default format)
+        # Strategy 5: generic export — docGuid (server default format, last resort)
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
@@ -490,14 +535,14 @@ class MemoQProjectService:
                 )
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
-                    logger.debug("export strategy 3: result has no GUID — raw=%r", raw)
+                    logger.warning("export strategy 5: no valid GUID — raw=%r", raw)
                 else:
-                    logger.warning("export strategy 3 (generic, docGuid) succeeded — format may not be XLIFF")
+                    logger.warning("export strategy 5 (generic, docGuid) succeeded — format may not be XLIFF")
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 3 (generic, docGuid) failed: %s", e)
+                logger.warning("export strategy 5 (generic, docGuid) failed: %s", e)
 
-        # Strategy 4: generic export — documentGuid, no options
+        # Strategy 6: generic export — documentGuid
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
@@ -507,16 +552,16 @@ class MemoQProjectService:
                 )
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
-                    logger.debug("export strategy 4: result has no GUID — raw=%r", raw)
+                    logger.warning("export strategy 6: no valid GUID — raw=%r", raw)
                 else:
-                    logger.warning("export strategy 4 (generic, documentGuid) succeeded — format may not be XLIFF")
+                    logger.warning("export strategy 6 (generic, documentGuid) succeeded — format may not be XLIFF")
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 4 (generic, documentGuid) failed: %s", e)
+                logger.warning("export strategy 6 (generic, documentGuid) failed: %s", e)
 
         if not file_guid:
             raise RuntimeError(
-                f"ExportTranslationDocumentAsXliffBilingual failed: {last_err}"
+                f"All export strategies failed. Last error: {last_err}"
             )
 
         # Download the exported file (chunked)
