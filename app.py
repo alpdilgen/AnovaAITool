@@ -57,12 +57,18 @@ if 'dnt_terms' not in st.session_state:
 # memoQ Server state
 if 'memoq_server_url' not in st.session_state:
     st.session_state.memoq_server_url = "https://mirage.memoq.com:9091/adaturkey"
+def _get_secret(key: str) -> str:
+    try:
+        return (st.secrets.get(key) or "") if hasattr(st, "secrets") else ""
+    except Exception:
+        return ""
+
 if 'memoq_username' not in st.session_state:
-    st.session_state.memoq_username = ""
+    st.session_state.memoq_username = _get_secret("memoq_username")
 if 'memoq_password' not in st.session_state:
-    st.session_state.memoq_password = ""
+    st.session_state.memoq_password = _get_secret("memoq_password")
 if 'memoq_api_key' not in st.session_state:
-    st.session_state.memoq_api_key = ""
+    st.session_state.memoq_api_key = _get_secret("memoq_api_key")
 if 'memoq_verify_ssl' not in st.session_state:
     st.session_state.memoq_verify_ssl = False
 if 'memoq_connected' not in st.session_state:
