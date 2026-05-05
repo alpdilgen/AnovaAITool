@@ -284,15 +284,11 @@ class MemoQUI:
             # Auto-load documents and project resources
             with st.spinner("Loading documents and TM/TB assignments..."):
                 try:
-                    if target_lang_codes:
-                        # Pass them through if our service supports it
-                        try:
-                            docs = proj_service.list_documents(
-                                proj_guid, target_lang_codes=target_lang_codes
-                            )
-                        except TypeError:
-                            docs = proj_service.list_documents(proj_guid)
-                    else:
+                    try:
+                        docs = proj_service.list_documents(
+                            proj_guid, target_lang_codes=target_lang_codes or None
+                        )
+                    except TypeError:
                         docs = proj_service.list_documents(proj_guid)
                     st.session_state.memoq_documents_list = docs
                 except Exception as e:
@@ -311,6 +307,9 @@ class MemoQUI:
                     logger.warning("get_project_resources failed: %s", e)
                     st.session_state.selected_tm_guids = []
                     st.session_state.selected_tb_guids = []
+            # Force a rerun so the document picker + language sidebar refresh
+            # immediately on the same click instead of needing a second Enter.
+            st.rerun()
 
         # ---- Document picker ------------------------------------------
         if not st.session_state.memoq_documents_list:

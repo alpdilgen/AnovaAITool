@@ -264,6 +264,19 @@ class MemoQProjectService:
         results_by_guid: Dict[str, Dict] = {}
 
         def _collect(res):
+            # The result might be wrapped in ArrayOfTranslationDocumentInfo or
+            # a single object — flatten anything iterable into individual rows.
+            if res is None:
+                return
+            if not isinstance(res, (list, tuple)):
+                inner = getattr(res, "TranslationDocumentInfo", None)
+                if inner is None:
+                    inner = getattr(res, "TranslationDocumentInfo2", None)
+                if inner is None:
+                    # zeep may return a single object directly
+                    res = [res]
+                else:
+                    res = inner if isinstance(inner, (list, tuple)) else [inner]
             for d in (res or []):
                 dd = self._zeep_to_dict(d)
                 guid = dd.get("DocumentGuid")
@@ -280,49 +293,79 @@ class MemoQProjectService:
                     "_raw": dd,
                 }
 
-        # Strategy A — call once per target language (the documented signature)
-        for tlc in (target_lang_codes or [None]):
+        # Strategy 0 — no target lang argument at all (most common signature
+        # on this server: ListProjectTranslationDocuments(serverProjectGuid))
+        try:
+            res = self._project_client.service.ListProjectTranslationDocuments(
+                serverProjectGuid=project_guid, _soapheaders=self._hdr()
+            )
+            _collect(res)
+        except Exception as e:
+            last_error = e
+
+        # Strategy 0b — also try the "2" variant with no extra args
+        if not results_by_guid:
             try:
-                kwargs = {"serverProjectGuid": project_guid}
-                if tlc:
-                    kwargs["targetLangCode"] = tlc
                 res = self._project_client.service.ListProjectTranslationDocuments2(
-                    **kwargs, _soapheaders=self._hdr()
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
                 )
                 _collect(res)
-                continue
             except Exception as e:
                 last_error = e
 
-            # Strategy B — older signature without "2"
-            try:
-                kwargs = {"serverProjectGuid": project_guid}
-                if tlc:
-                    kwargs["targetLangCode"] = tlc
-                res = self._project_client.service.ListProjectTranslationDocuments(
-                    **kwargs, _soapheaders=self._hdr()
-                )
-                _collect(res)
-                continue
-            except Exception as e:
-                last_error = e
+        # Strategy A — per target language (only if base signatures returned nothing)
+        if not results_by_guid:
+            for tlc in (target_lang_codes or []):
+                if not tlc:
+                    continue
+                # Try each known parameter spelling for the target lang code
+                for kwarg_name in ("targetLangCode", "targetLanguageCode", "languageCode"):
+                    try:
+                        kwargs = {"serverProjectGuid": project_guid, kwarg_name: tlc}
+                        res = self._project_client.service.ListProjectTranslationDocuments2(
+                            **kwargs, _soapheaders=self._hdr()
+                        )
+                        _collect(res)
+                        break
+                    except TypeError:
+                        # Wrong kwarg for this signature — try next spelling
+                        continue
+                    except Exception as e:
+                        last_error = e
+                        break
+                else:
+                    # Fall back to the non-"2" variant
+                    for kwarg_name in ("targetLangCode", "targetLanguageCode", "languageCode"):
+                        try:
+                            kwargs = {"serverProjectGuid": project_guid, kwarg_name: tlc}
+                            res = self._project_client.service.ListProjectTranslationDocuments(
+                                **kwargs, _soapheaders=self._hdr()
+                            )
+                            _collect(res)
+                            break
+                        except TypeError:
+                            continue
+                        except Exception as e:
+                            last_error = e
+                            break
 
-            # Strategy C — grouped-by-source-file fallback (always returns rows)
+        # Strategy C — grouped-by-source-file fallback
+        if not results_by_guid:
             try:
                 res = self._project_client.service.ListProjectTranslationDocumentsGroupedBySourceFile(
                     serverProjectGuid=project_guid, _soapheaders=self._hdr()
                 )
-                # The grouped result may have a nested document list
                 for grp in (res or []):
                     gdict = self._zeep_to_dict(grp)
                     docs = gdict.get("Documents") or gdict.get("TranslationDocuments")
                     inner = []
-                    if hasattr(docs, "__iter__"):
+                    if hasattr(docs, "__iter__") and not isinstance(docs, (str, bytes)):
                         inner = list(docs)
-                    elif docs is not None and hasattr(docs, "TranslationDocumentInfo"):
-                        inner = list(docs.TranslationDocumentInfo or [])
+                    elif docs is not None:
+                        tdi = getattr(docs, "TranslationDocumentInfo", None)
+                        if tdi is not None:
+                            inner = list(tdi) if isinstance(tdi, (list, tuple)) else [tdi]
                     _collect(inner)
-                continue
             except Exception as e:
                 last_error = e
 
