@@ -393,8 +393,18 @@ class MemoQProjectService:
             (xliff_bytes, suggested_filename) — xliff_bytes is the inner
             document.mqxliff if the server returned an .mqxlz ZIP, otherwise
             the raw XLIFF.
+
+        Uses four fallback strategies because memoQ server versions differ in
+        whether BilingualExportOptions is a named WSDL type or inline:
+          1. Named BilingualExportOptions type (standard WSDL)
+          2. Dict-style options (zeep resolves against inline element def)
+          3. Flat keyword parameters (some servers take them directly)
+          4. No explicit options (server default — last resort)
         """
-        # Build BilingualExportOptions (XLIFF, compressed if skeleton)
+        file_guid = None
+        last_err: Optional[Exception] = None
+
+        # Strategy 1: Named BilingualExportOptions type
         try:
             ExportOptions = self._project_client.get_type(
                 "{http://schemas.datacontract.org/2004/07/MemoQServices}"
@@ -407,7 +417,7 @@ class MemoQProjectService:
             opts = ExportOptions(
                 BilingualDocFormat=FormatEnum("XLIFF"),
                 IncludeSkeleton=include_skeleton,
-                SaveCompressed=include_skeleton,  # required if skeleton=True
+                SaveCompressed=include_skeleton,
                 IncludeFullVersionHistory=False,
                 FillInUnconfirmedTranslations=False,
             )
@@ -418,7 +428,61 @@ class MemoQProjectService:
                 _soapheaders=self._hdr(),
             )
         except Exception as e:
-            raise RuntimeError(f"ExportTranslationDocument failed: {e}") from e
+            last_err = e
+            logger.debug("export strategy 1 (named type) failed: %s", e)
+
+        # Strategy 2: Dict-style options (zeep resolves against inline element)
+        if file_guid is None:
+            try:
+                file_guid = self._project_client.service.ExportTranslationDocument(
+                    serverProjectGuid=project_guid,
+                    documentGuid=document_guid,
+                    exportOptions={
+                        'BilingualDocFormat': 'XLIFF',
+                        'IncludeSkeleton': include_skeleton,
+                        'SaveCompressed': include_skeleton,
+                        'IncludeFullVersionHistory': False,
+                        'FillInUnconfirmedTranslations': False,
+                    },
+                    _soapheaders=self._hdr(),
+                )
+            except Exception as e:
+                last_err = e
+                logger.debug("export strategy 2 (dict opts) failed: %s", e)
+
+        # Strategy 3: Flat keyword parameters (older servers take them directly)
+        if file_guid is None:
+            try:
+                file_guid = self._project_client.service.ExportTranslationDocument(
+                    serverProjectGuid=project_guid,
+                    documentGuid=document_guid,
+                    bilingualDocFormat='XLIFF',
+                    saveCompressed=include_skeleton,
+                    includeSkeleton=include_skeleton,
+                    _soapheaders=self._hdr(),
+                )
+            except Exception as e:
+                last_err = e
+                logger.debug("export strategy 3 (flat kwargs) failed: %s", e)
+
+        # Strategy 4: No explicit options — server uses its default format
+        if file_guid is None:
+            try:
+                file_guid = self._project_client.service.ExportTranslationDocument(
+                    serverProjectGuid=project_guid,
+                    documentGuid=document_guid,
+                    _soapheaders=self._hdr(),
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"ExportTranslationDocument failed: {e}"
+                ) from e
+
+        if not file_guid:
+            raise RuntimeError(
+                f"ExportTranslationDocument returned no file GUID. "
+                f"Last error: {last_err}"
+            )
 
         # Download the file by GUID (chunked)
         raw = self._download_file(file_guid)
@@ -591,21 +655,25 @@ class MemoQProjectService:
 
         view = memoryview(data)
         offset = 0
-        try:
-            while offset < len(view):
-                chunk = bytes(view[offset:offset + self.CHUNK_SIZE])
+        while offset < len(view):
+            chunk = bytes(view[offset:offset + self.CHUNK_SIZE])
+            try:
                 self._file_client.service.AddNextFileChunk(
                     fileGuid=file_guid,
                     fileChunk=chunk,
                     _soapheaders=self._hdr(),
                 )
-                offset += len(chunk)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Chunked upload failed at offset {offset}: {e}"
+                ) from e
+            offset += len(chunk)
+
+        try:
             self._file_client.service.EndChunkedFileUpload(
                 fileGuid=file_guid, _soapheaders=self._hdr()
             )
         except Exception as e:
-            raise RuntimeError(
-                f"Chunked upload failed at offset {offset}: {e}"
-            ) from e
+            raise RuntimeError(f"EndChunkedFileUpload failed: {e}") from e
 
         return str(file_guid)
