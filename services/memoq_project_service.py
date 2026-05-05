@@ -523,7 +523,7 @@ class MemoQProjectService:
             try:
                 with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
                     all_names = zf.namelist()
-                    logger.info("mqxlz contents: %s", all_names)
+                    logger.warning("mqxlz contents: %s", all_names)
 
                     # Priority: .mqxliff → .xliff/.xlf → .xml → XML content scan → any file
                     candidates = (
