@@ -300,24 +300,36 @@ class MemoQUI:
                     tgt_lang_for_lookup = target_lang_codes[0] if target_lang_codes else None
 
                     if rest_client and src_lang:
-                        # REST API: list server TMs/TBs for this language pair
-                        tms = rest_client.list_tms(
-                            src_lang=src_lang,
-                            tgt_lang=tgt_lang_for_lookup,
-                        )
-                        tm_guids = [
-                            str(tm.get('TMGuid') or tm.get('tmGuid') or '')
-                            for tm in (tms or [])
-                            if tm.get('TMGuid') or tm.get('tmGuid')
-                        ]
-                        tbs = rest_client.list_tbs(
-                            languages=([src_lang] + (target_lang_codes or [])) or None,
-                        )
-                        tb_guids = [
-                            str(tb.get('TBGuid') or tb.get('tbGuid') or '')
-                            for tb in (tbs or [])
-                            if tb.get('TBGuid') or tb.get('tbGuid')
-                        ]
+                        # Fetch all TMs and filter client-side by base language code.
+                        # Avoids REST API 400 errors from language code format mismatches
+                        # (e.g. eng-us vs eng-US) that occur when passing as query params.
+                        def _base(code):
+                            return str(code or '').lower().split('-')[0]
+
+                        src_base = _base(src_lang)
+                        tgt_base = _base(tgt_lang_for_lookup) if tgt_lang_for_lookup else None
+
+                        all_tms = rest_client.list_tms()
+                        tm_guids = []
+                        for tm in (all_tms or []):
+                            tm_src = _base(tm.get('SourceLangCode') or '')
+                            tm_tgt = _base(tm.get('TargetLangCode') or '')
+                            if tm_src == src_base and (tgt_base is None or tm_tgt == tgt_base):
+                                guid = tm.get('TMGuid') or tm.get('tmGuid')
+                                if guid:
+                                    tm_guids.append(str(guid))
+
+                        all_tbs = rest_client.list_tbs()
+                        tb_guids = []
+                        for tb in (all_tbs or []):
+                            tb_lang_bases = [_base(l) for l in (tb.get('Languages') or [])]
+                            if src_base in tb_lang_bases and (
+                                tgt_base is None or tgt_base in tb_lang_bases
+                            ):
+                                guid = tb.get('TBGuid') or tb.get('tbGuid')
+                                if guid:
+                                    tb_guids.append(str(guid))
+
                         st.session_state.selected_tm_guids = tm_guids
                         st.session_state.selected_tb_guids = tb_guids
                         st.caption(

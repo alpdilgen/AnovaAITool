@@ -431,11 +431,11 @@ class MemoQProjectService:
         complex result object depending on the server version. _extract_guid()
         handles both cases by scanning for a UUID-formatted string.
 
-        Four call-signature strategies for cross-version compatibility:
-          1. docGuid, no options   (Mirage v12.2 confirmed)
-          2. documentGuid, no options   (standard WSDL naming)
-          3. docGuid + dict exportOptions
-          4. documentGuid + dict exportOptions
+        Strategies (XLIFF-with-options tried first, no-options as fallback):
+          1. docGuid + XLIFF exportOptions   (preferred: forces XLIFF format)
+          2. documentGuid + XLIFF exportOptions
+          3. docGuid, no options             (fallback: server default format)
+          4. documentGuid, no options
         """
         file_guid: Optional[str] = None
         last_err: Optional[Exception] = None
@@ -448,11 +448,12 @@ class MemoQProjectService:
             'FillInUnconfirmedTranslations': False,
         }
 
-        # Strategy 1: docGuid, no options
+        # Strategy 1: docGuid + XLIFF options (preferred — forces XLIFF format)
         try:
             raw = self._project_client.service.ExportTranslationDocument(
                 serverProjectGuid=project_guid,
                 docGuid=document_guid,
+                exportOptions=export_opts,
                 _soapheaders=self._hdr(),
             )
             file_guid = _extract_guid(raw)
@@ -460,14 +461,15 @@ class MemoQProjectService:
                 logger.debug("export strategy 1: result has no GUID — raw=%r", raw)
         except Exception as e:
             last_err = e
-            logger.debug("export strategy 1 (docGuid, no opts) failed: %s", e)
+            logger.debug("export strategy 1 (docGuid, XLIFF opts) failed: %s", e)
 
-        # Strategy 2: documentGuid, no options
+        # Strategy 2: documentGuid + XLIFF options
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
                     serverProjectGuid=project_guid,
                     documentGuid=document_guid,
+                    exportOptions=export_opts,
                     _soapheaders=self._hdr(),
                 )
                 file_guid = _extract_guid(raw)
@@ -475,15 +477,14 @@ class MemoQProjectService:
                     logger.debug("export strategy 2: result has no GUID — raw=%r", raw)
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 2 (documentGuid, no opts) failed: %s", e)
+                logger.debug("export strategy 2 (documentGuid, XLIFF opts) failed: %s", e)
 
-        # Strategy 3: docGuid + dict options
+        # Strategy 3: docGuid, no options (fallback — uses server default format)
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
                     serverProjectGuid=project_guid,
                     docGuid=document_guid,
-                    exportOptions=export_opts,
                     _soapheaders=self._hdr(),
                 )
                 file_guid = _extract_guid(raw)
@@ -491,15 +492,14 @@ class MemoQProjectService:
                     logger.debug("export strategy 3: result has no GUID — raw=%r", raw)
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 3 (docGuid, dict opts) failed: %s", e)
+                logger.debug("export strategy 3 (docGuid, no opts) failed: %s", e)
 
-        # Strategy 4: documentGuid + dict options
+        # Strategy 4: documentGuid, no options
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
                     serverProjectGuid=project_guid,
                     documentGuid=document_guid,
-                    exportOptions=export_opts,
                     _soapheaders=self._hdr(),
                 )
                 file_guid = _extract_guid(raw)
@@ -507,7 +507,7 @@ class MemoQProjectService:
                     logger.debug("export strategy 4: result has no GUID — raw=%r", raw)
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 4 (documentGuid, dict opts) failed: %s", e)
+                logger.debug("export strategy 4 (documentGuid, no opts) failed: %s", e)
 
         if not file_guid:
             raise RuntimeError(
