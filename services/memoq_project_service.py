@@ -668,10 +668,13 @@ class MemoQProjectService:
     # ------------------------------------------------------------------ #
 
     def _download_file(self, file_guid: str) -> bytes:
+        # BeginChunkedFileDownload returns a sessionId (separate from fileGuid).
+        # GetNextFileChunk and EndChunkedFileDownload take sessionId, not fileGuid.
         try:
-            self._file_client.service.BeginChunkedFileDownload(
+            raw = self._file_client.service.BeginChunkedFileDownload(
                 fileGuid=file_guid, _soapheaders=self._hdr()
             )
+            session_id = _extract_guid(raw) or str(raw)
         except Exception as e:
             raise RuntimeError(f"BeginChunkedFileDownload failed: {e}") from e
 
@@ -679,7 +682,7 @@ class MemoQProjectService:
         try:
             while True:
                 chunk = self._file_client.service.GetNextFileChunk(
-                    fileGuid=file_guid,
+                    sessionId=session_id,
                     byteCount=self.CHUNK_SIZE,
                     _soapheaders=self._hdr(),
                 )
@@ -691,7 +694,7 @@ class MemoQProjectService:
         finally:
             try:
                 self._file_client.service.EndChunkedFileDownload(
-                    fileGuid=file_guid, _soapheaders=self._hdr()
+                    sessionId=session_id, _soapheaders=self._hdr()
                 )
             except Exception:
                 pass
