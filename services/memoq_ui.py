@@ -19,6 +19,11 @@ Version 3 additions:
     XMLParser.detect_languages() in app.py — that path stays as the source
     of truth, this just removes the "Upload a file to detect" placeholder
     moment from the sidebar.
+
+Version 20 change:
+  * Project and document selectboxes no longer auto-select the first item
+    on initial load. Nothing is selected until the user explicitly picks.
+    Previously-chosen project/document is still restored from session state.
 """
 
 from __future__ import annotations
@@ -235,8 +240,9 @@ class MemoQUI:
             if proj_search.lower() in lbl.lower()
         ]
 
-        # Pre-select previously chosen project (if still in filter)
-        default_idx = 0
+        # Restore previously chosen project if still present in filter;
+        # otherwise leave as None so nothing is auto-selected.
+        default_idx = None
         if st.session_state.memoq_selected_project_name:
             for i, lbl in enumerate(filtered_proj_labels):
                 if proj_options[lbl].get("Name") == st.session_state.memoq_selected_project_name:
@@ -246,7 +252,7 @@ class MemoQUI:
         selected_proj_label = st.selectbox(
             "Select project",
             options=filtered_proj_labels,
-            index=default_idx if filtered_proj_labels else None,
+            index=default_idx,
             key="proj_selectbox",
             label_visibility="collapsed",
         )
@@ -410,7 +416,9 @@ class MemoQUI:
             if doc_search.lower() in lbl.lower()
         ]
 
-        default_doc_idx = 0
+        # Restore previously chosen document if still present in filter;
+        # otherwise leave as None so nothing is auto-selected.
+        default_doc_idx = None
         if st.session_state.memoq_selected_document_name:
             for i, lbl in enumerate(filtered_doc_labels):
                 if doc_options[lbl].get("DocumentName") == st.session_state.memoq_selected_document_name:
@@ -420,7 +428,7 @@ class MemoQUI:
         selected_doc_label = st.selectbox(
             "Select document",
             options=filtered_doc_labels,
-            index=default_doc_idx if filtered_doc_labels else None,
+            index=default_doc_idx,
             key="doc_selectbox",
             label_visibility="collapsed",
         )
