@@ -102,15 +102,11 @@ if 'batch_size' not in st.session_state:
     st.session_state.batch_size = 20
 if 'segment_match_scores' not in st.session_state:
     st.session_state.segment_match_scores = {}
-if "last_xliff_bytes" not in st.session_state:
-    st.session_state.last_xliff_bytes = None
-if "last_xliff_filename" not in st.session_state:
-    st.session_state.last_xliff_filename = None
 
 # --- Sidebar ---
 with st.sidebar:
     st.title("⚙️ Configuration")
-    
+
     # Language Settings
     st.subheader("🌐 Languages")
 
@@ -150,9 +146,9 @@ with st.sidebar:
         tgt_code_3letter = 'tur'
         src_code_3letter_base = 'eng'
         tgt_code_3letter_base = 'tur'
-    
+
     st.divider()
-    
+
     # AI Settings
     st.subheader("🤖 AI Settings")
     # Pre-fill from Streamlit secrets if configured.
@@ -171,12 +167,12 @@ with st.sidebar:
         help="Pre-filled from Streamlit secrets if `openai_api_key` is set; otherwise paste here.",
     )
     model = st.selectbox("Model", config.OPENAI_MODELS)
-    
+
     st.divider()
-    
+
     # TM Settings
     st.subheader("📚 TM Settings")
-    
+
     acceptance_threshold = st.slider(
         "TM Acceptance Threshold",
         min_value=70,
@@ -184,7 +180,7 @@ with st.sidebar:
         value=config.DEFAULT_ACCEPTANCE_THRESHOLD,
         help="Matches ≥ this value bypass LLM (direct TM usage)"
     )
-    
+
     match_threshold = st.slider(
         "TM Match Threshold",
         min_value=50,
@@ -192,12 +188,12 @@ with st.sidebar:
         value=config.DEFAULT_MATCH_THRESHOLD,
         help="Matches ≥ this value are sent as context to LLM"
     )
-    
+
     if acceptance_threshold <= match_threshold:
         st.warning("Acceptance should be higher than Match threshold")
-    
+
     st.divider()
-    
+
     # Chat History Settings
     st.subheader("💬 Chat History")
     chat_history_length = st.slider(
@@ -207,9 +203,9 @@ with st.sidebar:
         value=config.DEFAULT_CHAT_HISTORY,
         help="Number of previous translation batches to include for consistency"
     )
-    
+
     st.divider()
-    
+
     # Batch Size Settings
     st.subheader("📦 Batch Processing")
     batch_size = st.slider(
@@ -221,13 +217,13 @@ with st.sidebar:
         help="Number of segments per batch sent to LLM"
     )
     st.session_state.batch_size = batch_size
-    
+
     st.divider()
 
 # ==================== memoQ SERVER CONNECTION ====================
     st.divider()
     st.subheader("🔗 memoQ Server")
-    
+
     with st.form("memoq_connection_form"):
         memoq_url = st.text_input(
             "Server URL",
@@ -235,13 +231,13 @@ with st.sidebar:
             help="memoQ Server base URL",
             key="memoq_url_input"
         )
-        
+
         memoq_user = st.text_input(
             "Username",
             value=st.session_state.memoq_username,
             key="memoq_user_input"
         )
-        
+
         memoq_pass = st.text_input(
             "Password",
             type="password",
@@ -308,14 +304,15 @@ with st.sidebar:
             st.session_state.memoq_connected = False
             st.session_state.memoq_client = None
             st.session_state.memoq_project_service = None
-    
+
     if st.session_state.memoq_connected and st.session_state.memoq_client:
         st.success("✓ Connected to memoQ Server")
         if st.button("🔌 Disconnect", width="stretch"):
             st.session_state.memoq_connected = False
             st.session_state.memoq_client = None
+            st.session_state.memoq_project_service = None
             st.rerun()
-    
+
     # Show if using generated prompt
     if st.session_state.use_generated_prompt and st.session_state.generated_prompt:
         st.divider()
@@ -332,12 +329,12 @@ def parse_reference_file(content: bytes, filename: str) -> list:
     """
     Parse reference file (target-only text) into chunks for style reference.
     Supports TXT, DOCX, PDF, HTML, RTF, and Excel formats.
-    
+
     Returns list of text chunks (sentences/paragraphs).
     """
     chunks = []
     filename_lower = filename.lower()
-    
+
     try:
         # === TXT ===
         if filename_lower.endswith('.txt'):
@@ -348,17 +345,17 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                     break
                 except Exception:
                     continue
-            
+
             if text:
                 text = text.replace('\r\n', '\n').replace('\r', '\n')
                 lines = [line.strip() for line in text.split('\n') if line.strip()]
-                
+
                 import re
                 for line in lines:
                     clean_line = re.sub(r'\d+$', '', line).strip()
                     if clean_line and len(clean_line) > 15:
                         chunks.append(clean_line)
-        
+
         # === DOCX ===
         elif filename_lower.endswith('.docx'):
             from docx import Document
@@ -368,7 +365,7 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                 text = para.text.strip()
                 if text and len(text) > 15:
                     chunks.append(text)
-        
+
         # === PDF ===
         elif filename_lower.endswith('.pdf'):
             import io
@@ -384,7 +381,7 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                                     chunks.append(line)
             except ImportError:
                 st.warning("PDF support requires pdfplumber: pip install pdfplumber")
-        
+
         # === HTML ===
         elif filename_lower.endswith(('.html', '.htm')):
             try:
@@ -396,13 +393,13 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                         break
                     except Exception:
                         continue
-                
+
                 if text:
                     soup = BeautifulSoup(text, 'html.parser')
                     # Remove script and style elements
                     for element in soup(['script', 'style', 'head', 'meta', 'link']):
                         element.decompose()
-                    
+
                     # Get text from paragraphs, divs, list items, etc.
                     for tag in soup.find_all(['p', 'div', 'li', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
                         text = tag.get_text(strip=True)
@@ -410,7 +407,7 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                             chunks.append(text)
             except ImportError:
                 st.warning("HTML support requires beautifulsoup4: pip install beautifulsoup4")
-        
+
         # === RTF ===
         elif filename_lower.endswith('.rtf'):
             try:
@@ -424,7 +421,7 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                             chunks.append(line)
             except ImportError:
                 st.warning("RTF support requires striprtf: pip install striprtf")
-        
+
         # === Excel (XLSX, XLS) ===
         elif filename_lower.endswith(('.xlsx', '.xls')):
             import io
@@ -444,10 +441,10 @@ def parse_reference_file(content: bytes, filename: str) -> list:
                                     chunks.append(text)
             except Exception as e:
                 st.warning(f"Excel parsing error: {e}")
-                    
+
     except Exception as e:
         st.warning(f"Error parsing reference file: {e}")
-    
+
     # Remove duplicates while preserving order
     seen = set()
     unique_chunks = []
@@ -455,50 +452,50 @@ def parse_reference_file(content: bytes, filename: str) -> list:
         if chunk not in seen:
             seen.add(chunk)
             unique_chunks.append(chunk)
-    
+
     return unique_chunks
 
 
 def get_reference_samples(chunks: list, batch_num: int, samples_per_batch: int = 5, max_chars: int = 1500) -> str:
     """
     Get reference samples for a batch using rotating selection.
-    
+
     Args:
         chunks: List of reference text chunks
         batch_num: Current batch number (for rotation)
         samples_per_batch: How many samples to include
         max_chars: Maximum total characters for all samples
-        
+
     Returns:
         Formatted string of reference samples
     """
     if not chunks:
         return ""
-    
+
     # Rotating selection - different chunks for each batch
     total_chunks = len(chunks)
     start_idx = (batch_num * samples_per_batch) % total_chunks
-    
+
     selected = []
     total_len = 0
-    
+
     for i in range(samples_per_batch):
         idx = (start_idx + i) % total_chunks
         chunk = chunks[idx]
-        
+
         # Truncate long chunks
         if len(chunk) > 300:
             chunk = chunk[:300] + "..."
-        
+
         if total_len + len(chunk) > max_chars:
             break
-            
+
         selected.append(chunk)
         total_len += len(chunk)
-    
+
     if not selected:
         return ""
-    
+
     return "\n".join(f"• {s}" for s in selected)
 
 
@@ -506,12 +503,12 @@ def parse_dnt_file(content: bytes, filename: str) -> list:
     """
     Parse Do Not Translate / Forbidden Terms file.
     Supports TXT and CSV formats.
-    
+
     Returns list of terms that should not be translated.
     """
     terms = []
     filename_lower = filename.lower()
-    
+
     try:
         if filename_lower.endswith('.txt'):
             text = None
@@ -521,14 +518,14 @@ def parse_dnt_file(content: bytes, filename: str) -> list:
                     break
                 except Exception:
                     continue
-            
+
             if text:
                 for line in text.split('\n'):
                     line = line.strip()
                     # Skip empty lines and comments
                     if line and not line.startswith('#'):
                         terms.append(line)
-        
+
         elif filename_lower.endswith('.csv'):
             text = None
             for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
@@ -537,7 +534,7 @@ def parse_dnt_file(content: bytes, filename: str) -> list:
                     break
                 except Exception:
                     continue
-            
+
             if text:
                 for line in text.split('\n'):
                     line = line.strip()
@@ -549,10 +546,10 @@ def parse_dnt_file(content: bytes, filename: str) -> list:
                         if term.lower() not in ['term', 'forbidden', 'dnt', 'do not translate', 'source']:
                             if term:
                                 terms.append(term)
-    
+
     except Exception as e:
         st.warning(f"Error parsing DNT file: {e}")
-    
+
     # Remove duplicates while preserving order
     seen = set()
     unique_terms = []
@@ -560,7 +557,7 @@ def parse_dnt_file(content: bytes, filename: str) -> list:
         if term not in seen:
             seen.add(term)
             unique_terms.append(term)
-    
+
     return unique_terms
 
 
@@ -630,29 +627,29 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         return
 
     with st.status("Processing...", expanded=True) as status:
-        
+
         # 1. Parse XLIFF
         st.write("📄 Parsing XLIFF...")
         segments = XMLParser.parse_xliff(xliff_bytes)
         total_segments = len(segments)
         st.write(f"✅ Loaded {total_segments} segments")
-        
+
         st.session_state.segment_objects = {seg.id: seg for seg in segments}
         st.session_state.chat_history = []
-        
+
         # Initialize Logger
         logger = TransactionLogger()
         logger.log(f"Started translation job for {total_segments} segments.")
         logger.log(f"Source: {src_code} | Target: {tgt_code} | Model: {model}")
         logger.log(f"TM Acceptance: ≥{acceptance_threshold}% | TM Match: ≥{match_threshold}%")
         logger.log(f"Chat History Length: {chat_history_length}")
-        
+
         if st.session_state.reference_chunks:
             logger.log(f"Reference file: {len(st.session_state.reference_chunks)} style samples loaded")
-        
+
         if st.session_state.use_generated_prompt:
             logger.log("Using generated prompt from Prompt Builder")
-        
+
         # 2. Initialize memoQ Server client if TMs/TBs selected
         memoq_client = None
         if memoq_tm_guids or memoq_tb_guids:
@@ -668,7 +665,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
             except Exception as e:
                 st.warning(f"Could not connect to memoQ Server: {str(e)}")
                 logger.log(f"memoQ connection error: {e}")
-        
+
         # 4. Initialize Prompt Builder
         # Priority: Generated prompt > Custom file > Default
         if st.session_state.use_generated_prompt and st.session_state.generated_prompt:
@@ -680,11 +677,11 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         else:
             prompt_builder = PromptBuilder(template_path=config.PROMPT_TEMPLATE_PATH)
             logger.log("Using default prompt template.")
-        
+
         translator = AITranslator("OpenAI", api_key, model)
-        
+
         status.update(label="Analyzing segments...", state="running")
-        
+
         # 5. Analyze segments
         bypass_segments = []
         llm_segments = []
@@ -782,10 +779,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     match_scores[seg.id] = 0
 
         # STEP E: memoQ TB lookup
-        # 1. Fetch TB metadata to get actual language codes (TB may use
-        #    2-letter codes like "en-us"/"tr" instead of 3-letter "eng"/"tur")
-        # 2. Extract n-grams from segments and send to lookupterms
-        # 3. Match found terms back to segments
         if memoq_client and memoq_tb_guids:
             import json as _json
             import re as _re
@@ -806,20 +799,17 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     if isinstance(tb_info, dict):
                         tb_languages = tb_info.get('Languages', [])
                     if tb_languages and isinstance(tb_languages, list):
-                        # Build all equivalent base codes for matching
-                        # e.g., src_code="en-us" → src_bases={"en", "eng"}
-                        #        src_code="eng"   → src_bases={"eng", "en"}
-                        _2to3 = config.ISO_TO_MEMOQ_LANG  # {'en': 'eng', 'tr': 'tur', ...}
-                        _3to2 = {v.lower(): k for k, v in _2to3.items()}  # {'eng': 'en', 'tur': 'tr', ...}
+                        _2to3 = config.ISO_TO_MEMOQ_LANG
+                        _3to2 = {v.lower(): k for k, v in _2to3.items()}
 
                         def _get_base_codes(code):
                             """Get all equivalent base codes: en→{en,eng}, eng→{eng,en}"""
                             base = code.lower().split('-')[0]
                             codes = {base}
                             if base in _2to3:
-                                codes.add(_2to3[base].lower())  # en → eng
+                                codes.add(_2to3[base].lower())
                             if base in _3to2:
-                                codes.add(_3to2[base])  # eng → en
+                                codes.add(_3to2[base])
                             return codes
 
                         src_bases = _get_base_codes(src_code)
@@ -837,7 +827,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
 
                 # --- Step 1: Extract unique n-grams from all segments ---
                 all_ngrams = set()
-                segment_words = {}  # seg_index -> cleaned lowercase text
+                segment_words = {}
                 for seg_i, src in enumerate(all_segment_sources):
                     clean = _re.sub(r'<[^>]+>', '', src)
                     clean = _re.sub(r'\{\{[^}]+\}\}', '', clean)
@@ -851,15 +841,10 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                             if len(ngram) > 3 and not ngram.isdigit():
                                 all_ngrams.add(ngram.lower())
 
-                # Strategy: prioritize short n-grams (1-3 words) since real
-                # terminology entries are usually 1-3 words. Then add longer
-                # ones. Also send full segments at the end as a final pass.
                 short_ngrams = sorted([ng for ng in all_ngrams if len(ng.split()) <= 3], key=len)
                 long_ngrams = sorted([ng for ng in all_ngrams if len(ng.split()) > 3], key=len, reverse=True)
-                # Combine: all short n-grams first, then longer ones up to limit
                 search_ngrams = short_ngrams + long_ngrams
                 search_ngrams = search_ngrams[:500]
-                # Also append full cleaned segments for lookupterms to extract
                 for seg_i, src in enumerate(all_segment_sources):
                     clean = _re.sub(r'<[^>]+>', '', src)
                     clean = _re.sub(r'\{\{[^}]+\}\}', '', clean)
@@ -905,7 +890,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 for hit in hit_group:
                                     if not isinstance(hit, dict):
                                         continue
-                                    # Extract terms from Entry.Languages[].TermItems[].Text
                                     entry = hit.get('Entry', hit)
                                     languages = entry.get('Languages', [])
                                     if not isinstance(languages, list):
@@ -925,14 +909,12 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                             txt = ti.get('Text', '').strip()
                                             if not txt or ti.get('IsForbidden', False):
                                                 continue
-                                            # Match language by comparing with TB's actual lang codes
                                             lc_base = lang_code.split('-')[0]
                                             if lang_code == tb_src_lang.lower() or lc_base in src_bases:
                                                 src_terms.append(txt)
                                             elif lang_code == tb_tgt_lang.lower() or lc_base in tgt_bases:
                                                 tgt_terms.append(txt)
 
-                                    # Fallback: try flat SourceTerm/TargetTerm fields
                                     if not src_terms:
                                         st_val = hit.get('SourceTerm', '') or entry.get('SourceTerm', '')
                                         if st_val:
@@ -980,10 +962,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
             analysis_progress.progress(0.8)
 
         # STEP F: TB validation of bypassed segments
-        # A TM-accepted segment may contain a term whose TM translation conflicts
-        # with the approved TB term. TB is mandatory and overrides TM acceptance.
-        # Any bypassed segment missing a required TB target term is demoted to LLM
-        # with the TM translation stored as context (starting point for adaptation).
         if tb_context:
             from models.entities import TMMatch as _TMMatch, TermMatch as _TermMatch
             still_bypassed = []
@@ -992,7 +970,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
             for seg in bypass_segments:
                 seg_tb_terms = tb_context.get(seg.id, [])
                 if not seg_tb_terms:
-                    # No TB terms for this segment — bypass stands
                     still_bypassed.append(seg)
                     continue
 
@@ -1007,13 +984,10 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                         target_base = term.get('target', '').lower().strip()
                     else:
                         continue
-                    # Check if the required target base form appears anywhere
-                    # in the TM translation (covers suffixed/inflected forms too)
                     if target_base and target_base not in tm_translation_lower:
                         missing.append(target_base)
 
                 if missing:
-                    # Demote: store TM translation as LLM context, send to LLM
                     tm_hit = _TMMatch(
                         source_text=seg.source,
                         target_text=tm_translation,
@@ -1037,74 +1011,68 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 logger.log(f"TB validation: {tb_demoted} segments demoted from TM bypass to LLM")
 
         analysis_progress.progress(1.0)
-        
+
         st.session_state.bypass_stats = {
             'bypassed': len(bypass_segments),
             'llm_sent': len(llm_segments),
             'total_segments': total_segments
         }
-        
+
         st.write(f"✅ **{len(bypass_segments)}** segments from TM (≥{acceptance_threshold}% match)")
         st.write(f"🔄 **{len(llm_segments)}** segments need LLM translation")
-        
+
         logger.log(f"Analysis complete: {len(bypass_segments)} bypass, {len(llm_segments)} LLM")
         logger.log_tm_matches(tm_context)
         logger.log_tb_matches(tb_context)
-        
-        # Log TM/non-TM segment distribution (no reordering — keep original document order)
-        # Reordering was removed: mixing TM-context and non-context segments in the same batch
-        # caused the LLM to only translate TM-context segments and skip the rest.
+
         segments_with_context = [s for s in llm_segments if s.id in tm_context]
         segments_no_context = [s for s in llm_segments if s.id not in tm_context]
-        
+
         logger.log(f"Segments: {len(segments_with_context)} with TM context, {len(segments_no_context)} without")
         logger.log(f"Processing in original document order")
-        
+
         # 6. Process LLM segments
         if llm_segments:
             status.update(label=f"Translating {len(llm_segments)} segments...", state="running")
 
             llm_progress = st.progress(0)
             batch_translations_history = []
-            
+
             for i in range(0, len(llm_segments), batch_size):
                 batch = llm_segments[i:i + batch_size]
                 batch_num = (i // batch_size) + 1
                 total_batches = (len(llm_segments) + batch_size - 1) // batch_size
-                
+
                 st.write(f"📤 Batch {batch_num}/{total_batches} ({len(batch)} segments)")
-                
+
                 logger.log_batch_start(batch_num, batch)
-                
+
                 batch_tm = {seg.id: tm_context.get(seg.id, []) for seg in batch}
                 batch_tb = {seg.id: tb_context.get(seg.id, []) for seg in batch}
-                
+
                 history_context = get_chat_history_context(
-                    batch_translations_history, 
+                    batch_translations_history,
                     chat_history_length * batch_size
                 )
-                
+
                 if history_context:
                     logger.log(f"Chat history: {len(history_context)} previous translations included")
-                
+
                 # Get reference samples for this batch
                 reference_samples = ""
-                
+
                 # Use semantic matching if embedding matcher is ready
                 if st.session_state.reference_embeddings_ready and st.session_state.embedding_matcher:
                     try:
-                        # Get source texts from batch
                         source_texts = [seg.source for seg in batch]
-                        
-                        # Find semantically similar references for all segments in batch
+
                         matcher = st.session_state.embedding_matcher
                         matches_dict = matcher.find_similar_batch(
                             source_texts,
                             top_k=3,
                             min_similarity=0.35
                         )
-                        
-                        # Collect unique references
+
                         all_matches = []
                         seen_indices = set()
                         for seg_matches in matches_dict.values():
@@ -1112,17 +1080,15 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 if m.index not in seen_indices:
                                     all_matches.append(m)
                                     seen_indices.add(m.index)
-                        
-                        # Sort by similarity and format
+
                         all_matches.sort(key=lambda x: x.similarity, reverse=True)
                         reference_samples = matcher.format_reference_context(all_matches[:8], max_chars=2000)
-                        
+
                         if reference_samples:
                             logger.log(f"Semantic reference: {len(all_matches)} matches, {len(reference_samples)} chars")
-                            
+
                     except Exception as e:
                         logger.log(f"Semantic reference error: {e}")
-                        # Fallback to simple sampling
                         if st.session_state.reference_chunks:
                             reference_samples = get_reference_samples(
                                 st.session_state.reference_chunks,
@@ -1130,8 +1096,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 samples_per_batch=5,
                                 max_chars=1500
                             )
-                
-                # Fallback: simple rotating samples (no embeddings)
+
                 elif st.session_state.reference_chunks:
                     reference_samples = get_reference_samples(
                         st.session_state.reference_chunks,
@@ -1141,23 +1106,23 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     )
                     if reference_samples:
                         logger.log(f"Reference (rotating): {len(reference_samples)} chars of style samples")
-                
+
                 # Get DNT terms
                 dnt_terms = st.session_state.dnt_terms if st.session_state.dnt_terms else None
                 if dnt_terms:
                     logger.log(f"DNT list: {len(dnt_terms)} forbidden terms")
-                
+
                 prompt = prompt_builder.build_prompt(
                     config.get_language_display_name(src_code),
                     config.get_language_display_name(tgt_code),
-                    batch, 
-                    batch_tm, 
+                    batch,
+                    batch_tm,
                     batch_tb,
                     chat_history=history_context,
                     reference_context=reference_samples,
                     dnt_terms=dnt_terms
                 )
-                
+
                 # Defensive guard: prompt must be a non-empty string
                 if not isinstance(prompt, str) or not prompt.strip():
                     st.error(f"❌ Prompt build failed for batch {batch_num}: prompt is {type(prompt).__name__} = {repr(prompt[:200] if prompt else prompt)}")
@@ -1195,12 +1160,10 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 except Exception:
                                     pass
 
-                        # IMPROVEMENT: Log actual translations for transparency
                         if parsed_translations:
                             logger.log(f"Parsed Response (Batch {batch_num}):")
                             for seg_id in sorted(parsed_translations.keys(), key=lambda x: int(x) if x.isdigit() else 0):
                                 trans_text = parsed_translations[seg_id]
-                                # Truncate to 80 chars for readability
                                 display_text = trans_text[:80] + "..." if len(trans_text) > 80 else trans_text
                                 logger.log(f"  [{seg_id}] {display_text}")
 
@@ -1216,13 +1179,11 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     st.error(f"❌ Authentication Error: {str(e)}")
                     st.info("Possible causes: Invalid API key, expired token, rate limit")
                     logger.log(f"ERROR: Authentication failed - {str(e)}")
-                    # Mark segments as failed
                     for seg in batch:
                         match_scores[seg.id] = 0
-                    break  # Stop processing further batches
+                    break
 
                 except Exception as e:
-                    # Unwrap tenacity RetryError to get the real cause
                     cause = getattr(e, '__cause__', None) or getattr(e, 'last_attempt', None)
                     if cause is not None:
                         real_exc = getattr(cause, 'exception', lambda: None)()
@@ -1234,18 +1195,17 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     logger.log(f"ERROR: {err_msg}")
                     for seg in batch:
                         match_scores[seg.id] = 0
-                    continue  # Try next batch
-                
+                    continue
+
                 llm_progress.progress((i + len(batch)) / len(llm_segments))
-        
+
         # 7. Save results
         duration = time.time() - start_time
         st.session_state.translation_results = final_translations
         st.session_state.translation_log = logger.get_content()
         st.session_state.chat_history = batch_translations_history if llm_segments else []
-        st.session_state.segment_match_scores = match_scores  # Store match scores for memoQ metadata
-        
-        # IMPROVEMENT: Log final summary
+        st.session_state.segment_match_scores = match_scores
+
         logger.log("\n" + "="*80)
         logger.log("TRANSLATION JOB SUMMARY")
         logger.log("="*80)
@@ -1259,12 +1219,11 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         num_batches = (len(llm_segments) + batch_size - 1) // batch_size if llm_segments else 0
         logger.log(f"Total Batches: {num_batches}")
         logger.log("="*80 + "\n")
-        
-        # Update session state with final log
+
         st.session_state.translation_log = logger.get_content()
-        
+
         status.update(label="✅ Translation Complete!", state="complete")
-        
+
         st.success(f"""
         **Translation Complete!**
         - {len(bypass_segments)} segments from TM (no API cost)
@@ -1332,7 +1291,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📂 Workspace", "📊 Results", "✨ Prompt 
 # === TAB 1: WORKSPACE ===
 with tab1:
     col1, col2 = st.columns([2, 1])
-    
+
     with col1:
         # ==================== memoQ SERVER RESOURCES ====================
         st.markdown("##### 🔗 memoQ Server Resources")
@@ -1364,28 +1323,28 @@ with tab1:
         # Reference file for style/tone with semantic matching
         st.markdown("---")
         st.markdown("##### 📑 Semantic Reference (Optional)")
-        
+
         reference_file = st.file_uploader(
             "Reference File (Target Language Only)",
             type=['txt', 'docx', 'pdf', 'html', 'htm', 'rtf', 'xlsx', 'xls'],
             help="Previously translated text for style/terminology reference. Supports TXT, DOCX, PDF, HTML, RTF, Excel."
         )
-        
+
         if reference_file:
             reference_file.seek(0)
             chunks = parse_reference_file(reference_file.getvalue(), reference_file.name)
             st.session_state.reference_chunks = chunks
-            
+
             if chunks:
                 # Show cost estimate
-                cost_info = get_embedding_cost_estimate(len(chunks), 100)  # Estimate for 100 segments
-                
+                cost_info = get_embedding_cost_estimate(len(chunks), 100)
+
                 col_ref1, col_ref2 = st.columns(2)
                 with col_ref1:
                     st.metric("Reference Samples", len(chunks))
                 with col_ref2:
                     st.metric("Est. Embedding Cost", cost_info['total_cost_formatted'])
-                
+
                 # Button to create embeddings
                 if not st.session_state.reference_embeddings_ready:
                     if api_key:
@@ -1393,23 +1352,22 @@ with tab1:
                             with st.spinner("Creating embeddings... This may take a minute."):
                                 try:
                                     matcher = EmbeddingMatcher(api_key)
-                                    
-                                    # Progress callback
+
                                     progress_bar = st.progress(0)
                                     def update_progress(current, total):
                                         progress_bar.progress(current / total if total > 0 else 0)
-                                    
+
                                     count, was_cached = matcher.load_reference(chunks, update_progress)
-                                    
+
                                     st.session_state.embedding_matcher = matcher
                                     st.session_state.reference_embeddings_ready = True
-                                    
+
                                     if was_cached:
                                         st.success(f"✅ Loaded {count} cached embeddings")
                                     else:
                                         st.success(f"✅ Created {count} embeddings")
                                     st.rerun()
-                                    
+
                                 except Exception as e:
                                     st.error(f"Embedding error: {e}")
                     else:
@@ -1420,22 +1378,22 @@ with tab1:
                         st.session_state.reference_embeddings_ready = False
                         st.session_state.embedding_matcher = None
                         st.rerun()
-                
+
                 with st.expander("Preview reference samples"):
                     for i, chunk in enumerate(chunks[:5]):
                         st.caption(f"{i+1}. {chunk[:100]}..." if len(chunk) > 100 else f"{i+1}. {chunk}")
                     if len(chunks) > 5:
                         st.caption(f"... and {len(chunks) - 5} more")
-        
+
         st.markdown("---")
-        
+
         # DNT (Do Not Translate) List
         dnt_file = st.file_uploader(
             "🚫 Do Not Translate List (TXT/CSV)",
             type=['txt', 'csv'],
             help="Terms that should remain in source language (brand names, product codes, etc.)"
         )
-        
+
         if dnt_file:
             dnt_file.seek(0)
             terms = parse_dnt_file(dnt_file.getvalue(), dnt_file.name)
@@ -1443,12 +1401,11 @@ with tab1:
             if terms:
                 st.success(f"🚫 **{len(terms)}** forbidden terms loaded")
                 with st.expander("Preview DNT terms"):
-                    # Show first 20 terms
                     for term in terms[:20]:
                         st.caption(f"• {term}")
                     if len(terms) > 20:
                         st.caption(f"... and {len(terms) - 20} more")
-        
+
         if st.session_state.use_generated_prompt:
             st.info("✨ Using prompt from Prompt Builder tab")
         elif st.session_state.get('uploaded_prompt_template'):
@@ -1476,7 +1433,6 @@ with tab1:
                 uploaded_tpl = st.session_state.get('uploaded_prompt_template')
                 if uploaded_tpl and not st.session_state.use_generated_prompt:
                     custom_prompt = uploaded_tpl
-                    # Warn if critical placeholders are missing
                     required_placeholders = ['%SEGMENTS%', '%TERMS%', '%FORBIDDENTERMS%', '%EXAMPLES%']
                     missing_ph = [p for p in required_placeholders if p not in custom_prompt]
                     if missing_ph:
@@ -1507,7 +1463,7 @@ with tab1:
 with tab2:
     if st.session_state.translation_results:
         st.subheader("Translation Output")
-        
+
         col_stat1, col_stat2, col_stat3 = st.columns(3)
         with col_stat1:
             st.metric("Total Segments", st.session_state.bypass_stats.get('total_segments', len(st.session_state.translation_results)))
@@ -1516,11 +1472,11 @@ with tab2:
             st.metric(f"From TM (≥{acceptance_threshold}%)", bypassed)
         with col_stat3:
             st.metric("Via LLM", st.session_state.bypass_stats.get('llm_sent', 0))
-        
+
         st.divider()
-        
+
         col_res1, col_res2 = st.columns(2)
-        
+
         with col_res1:
             _src_xliff = st.session_state.get('last_xliff_bytes')
             if _src_xliff:
@@ -1571,7 +1527,7 @@ with tab2:
                     file_name=f"translation_log_{timestamp}.txt",
                     mime="text/plain"
                 )
-        
+
         st.divider()
         st.subheader("Preview")
 
@@ -1603,9 +1559,9 @@ with tab2:
 with tab3:
     st.subheader("✨ Smart Prompt Builder")
     st.markdown("Generate optimized prompts from Analysis Reports and Style Guides")
-    
+
     col_pb1, col_pb2 = st.columns([1, 1])
-    
+
     with col_pb1:
         st.markdown("#### 📄 Upload Documents")
 
@@ -1637,21 +1593,21 @@ with tab3:
             help="AICONTEXT analysis report",
             key="analysis_docx"
         )
-        
+
         style_file = st.file_uploader(
             "📋 Style Guide (DOCX)",
             type=['docx'],
             help="Translation style guide",
             key="style_docx"
         )
-        
+
         dnt_file = st.file_uploader(
             "🚫 Do Not Translate / Forbidden Terms (TXT/CSV)",
             type=['txt', 'csv'],
             help="List of terms to avoid in translation. One term per line or CSV format.",
             key="dnt_file"
         )
-        
+
         # Parse DNT file
         forbidden_terms = []
         if dnt_file:
@@ -1663,18 +1619,18 @@ with tab3:
             st.success(f"🚫 **{len(forbidden_terms)}** forbidden terms loaded")
             with st.expander("Preview forbidden terms"):
                 st.write(", ".join(forbidden_terms[:20]) + ("..." if len(forbidden_terms) > 20 else ""))
-        
+
         # Analyze uploaded files
         analysis_result = None
         style_result = None
-        
+
         if analysis_file:
             analysis_file.seek(0)
             analysis_result = DocumentAnalyzer.analyze_file(
-                analysis_file.getvalue(), 
+                analysis_file.getvalue(),
                 analysis_file.name
             )
-            
+
             with st.expander("📊 Analysis Report Extracted Data", expanded=True):
                 if analysis_result.domain:
                     st.success(f"**Domain:** {analysis_result.domain}")
@@ -1686,14 +1642,14 @@ with tab3:
                     st.write(f"**Terminology:** {len(analysis_result.terminology_categories)} categories")
                 if analysis_result.critical_numbers:
                     st.write(f"**Critical Numbers:** {len(analysis_result.critical_numbers)} items")
-                    
+
         if style_file:
             style_file.seek(0)
             style_result = DocumentAnalyzer.analyze_file(
                 style_file.getvalue(),
                 style_file.name
             )
-            
+
             with st.expander("📋 Style Guide Extracted Data", expanded=True):
                 if style_result.style_rules:
                     st.write(f"**Style Rules:** {len(style_result.style_rules)} rules")
@@ -1702,13 +1658,13 @@ with tab3:
                     st.write(f"**Gender/Inclusivity:** {len(style_result.gender_inclusivity)} rules")
                 if style_result.do_not_translate:
                     st.write(f"**DNT Items:** {len(style_result.do_not_translate)} items")
-        
+
         st.divider()
-        
+
         # Generate button
-        if st.button("🔮 Generate Prompt", type="primary", width="stretch", 
+        if st.button("🔮 Generate Prompt", type="primary", width="stretch",
                      disabled=(not analysis_file and not style_file and not dnt_file)):
-            
+
             prompt, metadata = PromptGenerator.generate(
                 analysis=analysis_result,
                 style_guide=style_result,
@@ -1716,14 +1672,14 @@ with tab3:
                 target_lang=config.get_language_display_name(tgt_code),
                 forbidden_terms=forbidden_terms
             )
-            
+
             st.session_state.generated_prompt = prompt
             st.session_state.prompt_metadata = metadata
             st.success("✅ Prompt generated!")
-    
+
     with col_pb2:
         st.markdown("#### 📝 Generated Prompt")
-        
+
         if st.session_state.generated_prompt:
             # Show metadata
             meta = st.session_state.prompt_metadata
@@ -1736,7 +1692,7 @@ with tab3:
                 st.metric("Format Rules", meta.get('formatting_rules_count', 0))
             with col_m4:
                 st.metric("🚫 Forbidden", meta.get('forbidden_terms_count', 0))
-            
+
             # Editable prompt
             edited_prompt = st.text_area(
                 "Edit prompt (optional):",
@@ -1744,21 +1700,21 @@ with tab3:
                 height=400,
                 key="prompt_editor"
             )
-            
+
             # Update if edited
             if edited_prompt != st.session_state.generated_prompt:
                 st.session_state.generated_prompt = edited_prompt
-            
+
             st.divider()
-            
+
             # Action buttons
             col_act1, col_act2, col_act3 = st.columns(3)
-            
+
             with col_act1:
                 if st.button("✅ Use This Prompt", type="primary", width="stretch"):
                     st.session_state.use_generated_prompt = True
                     st.success("Prompt activated! Go to Workspace tab to start translation.")
-                    
+
             with col_act2:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 st.download_button(
@@ -1768,7 +1724,7 @@ with tab3:
                     mime="text/plain",
                     width="stretch"
                 )
-            
+
             with col_act3:
                 if st.button("🗑️ Clear", width="stretch"):
                     st.session_state.generated_prompt = None
@@ -1783,7 +1739,7 @@ with tab3:
             3. Review and edit if needed
             4. Click "Use This Prompt" to activate
             5. Go to Workspace tab and start translation
-            
+
             **Extracted elements:**
             - Domain & context from Analysis Report
             - Technical protocols (decimal, units, etc.)
