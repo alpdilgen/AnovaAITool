@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,8 +41,6 @@ logger = logging.getLogger(__name__)
 # Disable noisy SSL warnings when verify=False (self-signed memoQ certs)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Lazy import of zeep so the module loads even if zeep is missing,
-# but obviously the SOAP calls will fail until it's installed.
 try:
     from zeep import Client as ZeepClient
     from zeep import Transport
@@ -58,12 +57,66 @@ except Exception:  # pragma: no cover
 
 _APIKEY_NAMESPACE = "http://kilgray.com/memoqservices/2007"
 
+_GUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
 
 def _build_apikey_header(api_key: str):
     """Build the <ApiKey xmlns=...>...</ApiKey> SOAP header element."""
     el = etree.Element("{%s}ApiKey" % _APIKEY_NAMESPACE)
     el.text = api_key
     return [el]
+
+
+def _extract_guid(value: Any) -> Optional[str]:
+    """
+    Extract a plain GUID string from whatever ExportTranslationDocument returns.
+
+    Some memoQ server versions return a bare GUID string; others return a
+    complex object (e.g. containing ResultStatus + a GUID field). This
+    function handles both cases:
+      1. value is already a valid GUID string → return as-is
+      2. value has a well-known GUID attribute → return that
+      3. scan every string attribute for UUID format → return first match
+    """
+    if value is None:
+        return None
+
+    # Plain string GUID
+    if isinstance(value, str) and _GUID_RE.match(value.strip()):
+        return value.strip()
+
+    # Check well-known field names first (most specific)
+    for field in (
+        "ExportedDocumentGuid", "FileGuid", "Guid",
+        "DocumentGuid", "ExportGuid", "ResultFileGuid",
+    ):
+        v = getattr(value, field, None)
+        if v is not None:
+            s = str(v).strip()
+            if _GUID_RE.match(s):
+                return s
+
+    # Scan all attributes for anything matching UUID format
+    try:
+        for attr in dir(value):
+            if attr.startswith("_"):
+                continue
+            try:
+                v = getattr(value, attr)
+            except Exception:
+                continue
+            if callable(v):
+                continue
+            s = str(v).strip() if v is not None else ""
+            if _GUID_RE.match(s):
+                return s
+    except Exception:
+        pass
+
+    return None
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -135,7 +188,6 @@ class MemoQProjectService:
         self.verify_ssl = verify_ssl
         self.timeout = timeout
 
-        # Build a shared requests session for zeep (handles SSL + timeouts)
         self._session = requests.Session()
         self._session.verify = verify_ssl
         transport = Transport(session=self._session, timeout=timeout)
@@ -191,7 +243,6 @@ class MemoQProjectService:
           DeadLine, CreationTime, ProjectStatus
         """
         try:
-            # ListProjects(filter) — pass an empty filter struct to get all
             ProjectFilter = self._project_client.get_type(
                 "{http://kilgray.com/memoqservices/2007/projects}"
                 "ServerProjectListFilter"
@@ -201,7 +252,6 @@ class MemoQProjectService:
                 filter=flt, _soapheaders=self._hdr()
             )
         except Exception:
-            # Older WSDLs use no-arg ListProjects
             try:
                 res = self._project_client.service.ListProjects(
                     _soapheaders=self._hdr()
@@ -241,14 +291,7 @@ class MemoQProjectService:
         """
         List translation documents in a project. Returns dicts with:
           DocumentGuid, DocumentName, TargetLangCode, WorkflowStatus, Version
-
-        memoQ's ListProjectTranslationDocuments2 expects a target language
-        code (or list of them). We try multiple call shapes for compatibility
-        across server versions.
-
-        If target_lang_codes is None we resolve them from the project record.
         """
-        # Resolve target languages if caller didn't provide them
         if not target_lang_codes:
             try:
                 project = self._project_client.service.GetProject(
@@ -264,8 +307,6 @@ class MemoQProjectService:
         results_by_guid: Dict[str, Dict] = {}
 
         def _collect(res):
-            # The result might be wrapped in ArrayOfTranslationDocumentInfo or
-            # a single object — flatten anything iterable into individual rows.
             if res is None:
                 return
             if not isinstance(res, (list, tuple)):
@@ -273,7 +314,6 @@ class MemoQProjectService:
                 if inner is None:
                     inner = getattr(res, "TranslationDocumentInfo2", None)
                 if inner is None:
-                    # zeep may return a single object directly
                     res = [res]
                 else:
                     res = inner if isinstance(inner, (list, tuple)) else [inner]
@@ -293,8 +333,7 @@ class MemoQProjectService:
                     "_raw": dd,
                 }
 
-        # Strategy 0 — no target lang argument at all (most common signature
-        # on this server: ListProjectTranslationDocuments(serverProjectGuid))
+        # Strategy 0 — plain ListProjectTranslationDocuments
         try:
             res = self._project_client.service.ListProjectTranslationDocuments(
                 serverProjectGuid=project_guid, _soapheaders=self._hdr()
@@ -303,7 +342,7 @@ class MemoQProjectService:
         except Exception as e:
             last_error = e
 
-        # Strategy 0b — also try the "2" variant with no extra args
+        # Strategy 0b — "2" variant, no extra args
         if not results_by_guid:
             try:
                 res = self._project_client.service.ListProjectTranslationDocuments2(
@@ -313,12 +352,11 @@ class MemoQProjectService:
             except Exception as e:
                 last_error = e
 
-        # Strategy A — per target language (only if base signatures returned nothing)
+        # Strategy A — per target language with various kwarg spellings
         if not results_by_guid:
             for tlc in (target_lang_codes or []):
                 if not tlc:
                     continue
-                # Try each known parameter spelling for the target lang code
                 for kwarg_name in ("targetLangCode", "targetLanguageCode", "languageCode"):
                     try:
                         kwargs = {"serverProjectGuid": project_guid, kwarg_name: tlc}
@@ -328,13 +366,11 @@ class MemoQProjectService:
                         _collect(res)
                         break
                     except TypeError:
-                        # Wrong kwarg for this signature — try next spelling
                         continue
                     except Exception as e:
                         last_error = e
                         break
                 else:
-                    # Fall back to the non-"2" variant
                     for kwarg_name in ("targetLangCode", "targetLanguageCode", "languageCode"):
                         try:
                             kwargs = {"serverProjectGuid": project_guid, kwarg_name: tlc}
@@ -389,39 +425,54 @@ class MemoQProjectService:
         """
         Export the document as a bilingual XLIFF (runs silently in background).
 
-        Returns:
-            (xliff_bytes, suggested_filename) — xliff_bytes is the inner
-            document.mqxliff if the server returned an .mqxlz ZIP, otherwise
-            the raw XLIFF.
+        Returns (xliff_bytes, suggested_filename).
 
-        Four fallback strategies for cross-version WSDL compatibility:
-          1. docGuid + no options   (Mirage v12.2 signature)
-          2. documentGuid + no options   (standard WSDL naming)
-          3. docGuid + dict options   (docGuid servers that accept exportOptions)
-          4. documentGuid + dict options   (standard WSDL with options)
+        ExportTranslationDocument may return either a bare GUID string or a
+        complex result object depending on the server version. _extract_guid()
+        handles both cases by scanning for a UUID-formatted string.
+
+        Four call-signature strategies for cross-version compatibility:
+          1. docGuid, no options   (Mirage v12.2 confirmed)
+          2. documentGuid, no options   (standard WSDL naming)
+          3. docGuid + dict exportOptions
+          4. documentGuid + dict exportOptions
         """
-        file_guid = None
+        file_guid: Optional[str] = None
         last_err: Optional[Exception] = None
 
-        # Strategy 1: docGuid, no options — confirmed signature on Mirage v12.2
+        export_opts = {
+            'BilingualDocFormat': 'XLIFF',
+            'IncludeSkeleton': include_skeleton,
+            'SaveCompressed': include_skeleton,
+            'IncludeFullVersionHistory': False,
+            'FillInUnconfirmedTranslations': False,
+        }
+
+        # Strategy 1: docGuid, no options
         try:
-            file_guid = self._project_client.service.ExportTranslationDocument(
+            raw = self._project_client.service.ExportTranslationDocument(
                 serverProjectGuid=project_guid,
                 docGuid=document_guid,
                 _soapheaders=self._hdr(),
             )
+            file_guid = _extract_guid(raw)
+            if file_guid is None:
+                logger.debug("export strategy 1: result has no GUID — raw=%r", raw)
         except Exception as e:
             last_err = e
             logger.debug("export strategy 1 (docGuid, no opts) failed: %s", e)
 
-        # Strategy 2: documentGuid, no options — standard WSDL naming
+        # Strategy 2: documentGuid, no options
         if file_guid is None:
             try:
-                file_guid = self._project_client.service.ExportTranslationDocument(
+                raw = self._project_client.service.ExportTranslationDocument(
                     serverProjectGuid=project_guid,
                     documentGuid=document_guid,
                     _soapheaders=self._hdr(),
                 )
+                file_guid = _extract_guid(raw)
+                if file_guid is None:
+                    logger.debug("export strategy 2: result has no GUID — raw=%r", raw)
             except Exception as e:
                 last_err = e
                 logger.debug("export strategy 2 (documentGuid, no opts) failed: %s", e)
@@ -429,18 +480,15 @@ class MemoQProjectService:
         # Strategy 3: docGuid + dict options
         if file_guid is None:
             try:
-                file_guid = self._project_client.service.ExportTranslationDocument(
+                raw = self._project_client.service.ExportTranslationDocument(
                     serverProjectGuid=project_guid,
                     docGuid=document_guid,
-                    exportOptions={
-                        'BilingualDocFormat': 'XLIFF',
-                        'IncludeSkeleton': include_skeleton,
-                        'SaveCompressed': include_skeleton,
-                        'IncludeFullVersionHistory': False,
-                        'FillInUnconfirmedTranslations': False,
-                    },
+                    exportOptions=export_opts,
                     _soapheaders=self._hdr(),
                 )
+                file_guid = _extract_guid(raw)
+                if file_guid is None:
+                    logger.debug("export strategy 3: result has no GUID — raw=%r", raw)
             except Exception as e:
                 last_err = e
                 logger.debug("export strategy 3 (docGuid, dict opts) failed: %s", e)
@@ -448,37 +496,32 @@ class MemoQProjectService:
         # Strategy 4: documentGuid + dict options
         if file_guid is None:
             try:
-                file_guid = self._project_client.service.ExportTranslationDocument(
+                raw = self._project_client.service.ExportTranslationDocument(
                     serverProjectGuid=project_guid,
                     documentGuid=document_guid,
-                    exportOptions={
-                        'BilingualDocFormat': 'XLIFF',
-                        'IncludeSkeleton': include_skeleton,
-                        'SaveCompressed': include_skeleton,
-                        'IncludeFullVersionHistory': False,
-                        'FillInUnconfirmedTranslations': False,
-                    },
+                    exportOptions=export_opts,
                     _soapheaders=self._hdr(),
                 )
+                file_guid = _extract_guid(raw)
+                if file_guid is None:
+                    logger.debug("export strategy 4: result has no GUID — raw=%r", raw)
             except Exception as e:
-                raise RuntimeError(
-                    f"ExportTranslationDocument failed: {e}"
-                ) from e
+                last_err = e
+                logger.debug("export strategy 4 (documentGuid, dict opts) failed: %s", e)
 
         if not file_guid:
             raise RuntimeError(
-                f"ExportTranslationDocument returned no file GUID. "
-                f"Last error: {last_err}"
+                f"ExportTranslationDocument failed: {last_err}"
             )
 
-        # Download the file by GUID (chunked)
-        raw = self._download_file(file_guid)
+        # Download the exported file (chunked)
+        raw_bytes = self._download_file(file_guid)
 
         # If it's a .mqxlz (ZIP), extract document.mqxliff
         suggested_name = "document.mqxliff"
-        if raw[:2] == b"PK":
+        if raw_bytes[:2] == b"PK":
             try:
-                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
                     name_priority = [
                         n for n in zf.namelist()
                         if n.lower().endswith(".mqxliff")
@@ -492,16 +535,16 @@ class MemoQProjectService:
                         )
                     inner = name_priority[0]
                     suggested_name = inner.split("/")[-1]
-                    raw = zf.read(inner)
+                    raw_bytes = zf.read(inner)
             except zipfile.BadZipFile as e:
                 raise RuntimeError(
                     f"Bilingual export was ZIP-magic but unreadable: {e}"
                 ) from e
 
         logger.info(
-            "Bilingual export OK — %d bytes (%s)", len(raw), suggested_name
+            "Bilingual export OK — %d bytes (%s)", len(raw_bytes), suggested_name
         )
-        return raw, suggested_name
+        return raw_bytes, suggested_name
 
     # ------------------------------------------------------------------ #
     # Bilingual update (round-trip)                                       #
@@ -516,17 +559,14 @@ class MemoQProjectService:
     ) -> Optional[int]:
         """
         Push a corrected XLIFF back into the project document.
-        Calls UpdateTranslationDocumentFromBilingual(... "XLIFF").
-
         Returns the new document version number (if available), else None.
         """
         upload_guid = self._upload_file(xliff_bytes, filename=filename)
 
-        # Try docGuid naming first (Mirage v12.2), then documentGuid (standard),
-        # then positional as last resort.
         updated = False
         last_err: Optional[Exception] = None
 
+        # Strategy 1: docGuid naming (Mirage v12.2)
         try:
             self._project_client.service.UpdateTranslationDocumentFromBilingual(
                 serverProjectGuid=project_guid,
@@ -540,6 +580,7 @@ class MemoQProjectService:
             last_err = e
             logger.debug("update strategy 1 (docGuid) failed: %s", e)
 
+        # Strategy 2: documentGuid naming (standard WSDL)
         if not updated:
             try:
                 self._project_client.service.UpdateTranslationDocumentFromBilingual(
@@ -554,6 +595,7 @@ class MemoQProjectService:
                 last_err = e
                 logger.debug("update strategy 2 (documentGuid) failed: %s", e)
 
+        # Strategy 3: positional args
         if not updated:
             try:
                 self._project_client.service.UpdateTranslationDocumentFromBilingual(
@@ -566,7 +608,7 @@ class MemoQProjectService:
                     f"UpdateTranslationDocumentFromBilingual failed: {e}"
                 ) from e
 
-        # Try to read back the new version number
+        # Read back the new version number
         try:
             docs = self.list_documents(project_guid)
             for d in docs:
@@ -664,6 +706,9 @@ class MemoQProjectService:
             )
         except Exception as e:
             raise RuntimeError(f"BeginChunkedFileUpload failed: {e}") from e
+
+        # Extract GUID if server returns a complex object
+        file_guid = _extract_guid(file_guid) or str(file_guid)
 
         view = memoryview(data)
         offset = 0
