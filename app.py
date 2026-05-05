@@ -641,15 +641,9 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         st.write(f"✅ Loaded {total_segments} segments")
 
         if total_segments == 0:
-            try:
-                preview = xliff_bytes[:500].decode('utf-8', errors='replace')
-            except Exception:
-                preview = repr(xliff_bytes[:80])
             st.error(
-                f"⚠️ No translatable segments found.\n\n"
-                f"**File:** `{st.session_state.get('last_xliff_filename', '?')}` "
-                f"({len(xliff_bytes)} bytes)\n\n"
-                f"**Content preview:**\n```\n{preview}\n```"
+                "⚠️ No translatable segments found in the exported document. "
+                "The bilingual export may have failed or the document has no active segments."
             )
             return
 
