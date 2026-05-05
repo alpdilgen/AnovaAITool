@@ -29,7 +29,7 @@ from __future__ import annotations
 import io
 import logging
 import zipfile
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import urllib3
@@ -64,6 +64,35 @@ def _build_apikey_header(api_key: str):
     el = etree.Element("{%s}ApiKey" % _APIKEY_NAMESPACE)
     el.text = api_key
     return [el]
+
+
+# --- Helpers ----------------------------------------------------------------
+
+
+def _flatten_string_list(value: Any) -> List[str]:
+    """
+    memoQ WSDL wraps repeated <string> elements in an ArrayOfstring container,
+    so zeep returns the value either as a list[str], a wrapper object with a
+    `.string` attribute that is itself a list, or just a single str. Normalise
+    every shape into a clean list[str], skipping the literal placeholder
+    'string' that the WSDL ships when the field is empty.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value and value.lower() != "string" else []
+    if isinstance(value, (list, tuple)):
+        out: List[str] = []
+        for v in value:
+            out.extend(_flatten_string_list(v))
+        return out
+    inner = getattr(value, "string", None)
+    if inner is not None:
+        return _flatten_string_list(inner)
+    try:
+        return [str(value)] if str(value).lower() != "string" else []
+    except Exception:
+        return []
 
 
 # --- Service ----------------------------------------------------------------
@@ -183,12 +212,12 @@ class MemoQProjectService:
         items: List[Dict] = []
         for p in (res or []):
             d = self._zeep_to_dict(p)
-            # Try to surface common fields up to top level for UI convenience
+            target_langs = _flatten_string_list(d.get("TargetLanguageCodes"))
             items.append({
                 "ServerProjectGuid": d.get("ServerProjectGuid"),
                 "Name": d.get("Name"),
                 "SourceLanguageCode": d.get("SourceLanguageCode"),
-                "TargetLanguageCodes": d.get("TargetLanguageCodes"),
+                "TargetLanguageCodes": target_langs,
                 "DeadLine": str(d.get("DeadLine")) if d.get("DeadLine") else "",
                 "CreationTime": str(d.get("CreationTime")) if d.get("CreationTime") else "",
                 "ProjectStatus": d.get("ProjectStatus"),
@@ -204,37 +233,103 @@ class MemoQProjectService:
         logger.info("Listed %d server projects", len(items))
         return items
 
-    def list_documents(self, project_guid: str) -> List[Dict]:
+    def list_documents(
+        self,
+        project_guid: str,
+        target_lang_codes: Optional[List[str]] = None,
+    ) -> List[Dict]:
         """
         List translation documents in a project. Returns dicts with:
           DocumentGuid, DocumentName, TargetLangCode, WorkflowStatus, Version
-        """
-        try:
-            res = self._project_client.service.ListProjectTranslationDocuments2(
-                serverProjectGuid=project_guid, _soapheaders=self._hdr()
-            )
-        except AttributeError:
-            res = self._project_client.service.ListProjectTranslationDocuments(
-                serverProjectGuid=project_guid, _soapheaders=self._hdr()
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"ListProjectTranslationDocuments failed: {e}"
-            ) from e
 
-        items: List[Dict] = []
-        for d in (res or []):
-            dd = self._zeep_to_dict(d)
-            items.append({
-                "DocumentGuid": dd.get("DocumentGuid"),
-                "DocumentName": dd.get("DocumentName") or dd.get("Name"),
-                "TargetLangCode": dd.get("TargetLangCode"),
-                "WorkflowStatus": dd.get("WorkflowStatus"),
-                "Version": dd.get("Version"),
-                "TotalRowCount": dd.get("TotalRowCount"),
-                "ConfirmedRowCount": dd.get("ConfirmedRowCount"),
-                "_raw": dd,
-            })
+        memoQ's ListProjectTranslationDocuments2 expects a target language
+        code (or list of them). We try multiple call shapes for compatibility
+        across server versions.
+
+        If target_lang_codes is None we resolve them from the project record.
+        """
+        # Resolve target languages if caller didn't provide them
+        if not target_lang_codes:
+            try:
+                project = self._project_client.service.GetProject(
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                )
+                pdict = self._zeep_to_dict(project)
+                target_lang_codes = _flatten_string_list(pdict.get("TargetLanguageCodes"))
+            except Exception as e:
+                logger.warning("GetProject failed while resolving target langs: %s", e)
+                target_lang_codes = []
+
+        last_error: Optional[Exception] = None
+        results_by_guid: Dict[str, Dict] = {}
+
+        def _collect(res):
+            for d in (res or []):
+                dd = self._zeep_to_dict(d)
+                guid = dd.get("DocumentGuid")
+                if not guid:
+                    continue
+                results_by_guid[str(guid)] = {
+                    "DocumentGuid": guid,
+                    "DocumentName": dd.get("DocumentName") or dd.get("Name"),
+                    "TargetLangCode": dd.get("TargetLangCode"),
+                    "WorkflowStatus": dd.get("WorkflowStatus"),
+                    "Version": dd.get("Version"),
+                    "TotalRowCount": dd.get("TotalRowCount"),
+                    "ConfirmedRowCount": dd.get("ConfirmedRowCount"),
+                    "_raw": dd,
+                }
+
+        # Strategy A — call once per target language (the documented signature)
+        for tlc in (target_lang_codes or [None]):
+            try:
+                kwargs = {"serverProjectGuid": project_guid}
+                if tlc:
+                    kwargs["targetLangCode"] = tlc
+                res = self._project_client.service.ListProjectTranslationDocuments2(
+                    **kwargs, _soapheaders=self._hdr()
+                )
+                _collect(res)
+                continue
+            except Exception as e:
+                last_error = e
+
+            # Strategy B — older signature without "2"
+            try:
+                kwargs = {"serverProjectGuid": project_guid}
+                if tlc:
+                    kwargs["targetLangCode"] = tlc
+                res = self._project_client.service.ListProjectTranslationDocuments(
+                    **kwargs, _soapheaders=self._hdr()
+                )
+                _collect(res)
+                continue
+            except Exception as e:
+                last_error = e
+
+            # Strategy C — grouped-by-source-file fallback (always returns rows)
+            try:
+                res = self._project_client.service.ListProjectTranslationDocumentsGroupedBySourceFile(
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                )
+                # The grouped result may have a nested document list
+                for grp in (res or []):
+                    gdict = self._zeep_to_dict(grp)
+                    docs = gdict.get("Documents") or gdict.get("TranslationDocuments")
+                    inner = []
+                    if hasattr(docs, "__iter__"):
+                        inner = list(docs)
+                    elif docs is not None and hasattr(docs, "TranslationDocumentInfo"):
+                        inner = list(docs.TranslationDocumentInfo or [])
+                    _collect(inner)
+                continue
+            except Exception as e:
+                last_error = e
+
+        items = list(results_by_guid.values())
+        if not items and last_error is not None:
+            raise RuntimeError(f"ListProjectTranslationDocuments failed: {last_error}") from last_error
+
         logger.info("Project %s: %d documents", project_guid, len(items))
         return items
 
@@ -374,9 +469,14 @@ class MemoQProjectService:
         tm_guids: List[str] = []
         tb_guids: List[str] = []
         try:
-            tms = self._project_client.service.ListProjectTMs(
-                serverProjectGuid=project_guid, _soapheaders=self._hdr()
-            )
+            try:
+                tms = self._project_client.service.ListProjectTMs2(
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                )
+            except Exception:
+                tms = self._project_client.service.ListProjectTMs(
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                )
             for tm in (tms or []):
                 d = self._zeep_to_dict(tm)
                 guid = d.get("TMGuid") or d.get("Guid") or d.get("ResourceGuid")
@@ -385,9 +485,14 @@ class MemoQProjectService:
         except Exception as e:
             logger.warning("ListProjectTMs failed: %s", e)
         try:
-            tbs = self._project_client.service.ListProjectTBs(
-                serverProjectGuid=project_guid, _soapheaders=self._hdr()
-            )
+            try:
+                tbs = self._project_client.service.ListProjectTBs3(
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                )
+            except Exception:
+                tbs = self._project_client.service.ListProjectTBs(
+                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                )
             for tb in (tbs or []):
                 d = self._zeep_to_dict(tb)
                 guid = d.get("TBGuid") or d.get("Guid") or d.get("ResourceGuid")

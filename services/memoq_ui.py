@@ -10,6 +10,15 @@ Architectural changes (Version 1):
   * Picking a document fetches its bilingual XLIFF and stores the bytes in
     `st.session_state.last_xliff_bytes` so the existing translation pipeline
     keeps working unchanged.
+
+Version 3 additions:
+  * Source language is filled into st.session_state.detected_languages as
+    soon as a project is picked (from project metadata).
+  * Target language is filled when a document is picked (from doc metadata).
+  * The bilingual XLIFF (when it arrives) still overrides these via
+    XMLParser.detect_languages() in app.py — that path stays as the source
+    of truth, this just removes the "Upload a file to detect" placeholder
+    moment from the sidebar.
 """
 
 from __future__ import annotations
@@ -22,6 +31,27 @@ import streamlit as st
 from services.memoq_server_client import MemoQServerClient
 
 logger = logging.getLogger(__name__)
+
+
+def _normalise_lang(code: Optional[str]) -> Optional[str]:
+    """Lowercase the language code, keep dialect (e.g. 'en-US' -> 'en-us')."""
+    if not code:
+        return None
+    return str(code).strip().lower() or None
+
+
+def _set_detected_lang(field: str, value: Optional[str]) -> None:
+    """
+    Write a single language slot into st.session_state.detected_languages
+    without clobbering the other slot.
+    """
+    if not value:
+        return
+    current = st.session_state.get('detected_languages') or {}
+    if not isinstance(current, dict):
+        current = {}
+    current[field] = value
+    st.session_state.detected_languages = current
 
 
 class MemoQUI:
@@ -117,6 +147,10 @@ class MemoQUI:
         Returns (selected_project_guid, selected_document_dict_or_None).
         On document selection, fetches the bilingual XLIFF and stores it in
         st.session_state.last_xliff_bytes (and last_xliff_filename).
+
+        Side effects on st.session_state.detected_languages:
+          - 'source' is set the moment a project is chosen (project metadata)
+          - 'target' is set when a document row is chosen (doc metadata)
         """
         # Ensure state keys exist
         for k, v in {
@@ -184,10 +218,11 @@ class MemoQUI:
 
         proj_options = {}
         for p in st.session_state.memoq_projects_list:
+            tgt_codes = p.get('TargetLanguageCodes') or []
+            tgt_str = ', '.join(tgt_codes) if tgt_codes else '?'
             label = (
                 f"{p.get('Name', '(unnamed)')}  "
-                f"[{p.get('SourceLanguageCode', '?')} -> "
-                f"{', '.join(p.get('TargetLanguageCodes') or []) or '?'}]"
+                f"[{p.get('SourceLanguageCode', '?')} -> {tgt_str}]"
             )
             proj_options[label] = p
 
@@ -218,7 +253,7 @@ class MemoQUI:
         selected_project = proj_options[selected_proj_label]
         proj_guid = selected_project.get("ServerProjectGuid")
 
-        # Project changed? reset doc list
+        # Project changed? reset doc list + push source language to sidebar state
         if proj_guid != st.session_state.memoq_selected_project_guid:
             st.session_state.memoq_selected_project_guid = proj_guid
             st.session_state.memoq_selected_project_name = selected_project.get("Name")
@@ -229,10 +264,36 @@ class MemoQUI:
             st.session_state.last_xliff_bytes = None
             st.session_state.last_xliff_filename = None
 
+            # ---- Push project's SOURCE language to sidebar state ----
+            src_lang = _normalise_lang(selected_project.get("SourceLanguageCode"))
+            if src_lang:
+                _set_detected_lang('source', src_lang)
+            # If project has exactly one target lang, push that too as a hint
+            tgt_codes = selected_project.get("TargetLanguageCodes") or []
+            if len(tgt_codes) == 1:
+                tgt_lang = _normalise_lang(tgt_codes[0])
+                if tgt_lang:
+                    _set_detected_lang('target', tgt_lang)
+
+            # Resolve target langs once so list_documents can iterate per-language
+            target_lang_codes = [
+                _normalise_lang(c) for c in (tgt_codes or []) if c
+            ]
+            target_lang_codes = [c for c in target_lang_codes if c]
+
             # Auto-load documents and project resources
             with st.spinner("Loading documents and TM/TB assignments..."):
                 try:
-                    docs = proj_service.list_documents(proj_guid)
+                    if target_lang_codes:
+                        # Pass them through if our service supports it
+                        try:
+                            docs = proj_service.list_documents(
+                                proj_guid, target_lang_codes=target_lang_codes
+                            )
+                        except TypeError:
+                            docs = proj_service.list_documents(proj_guid)
+                    else:
+                        docs = proj_service.list_documents(proj_guid)
                     st.session_state.memoq_documents_list = docs
                 except Exception as e:
                     st.error(f"Failed to list documents: {e}")
@@ -304,11 +365,21 @@ class MemoQUI:
         selected_doc = doc_options[selected_doc_label]
         doc_guid = selected_doc.get("DocumentGuid")
 
-        # Document changed? fetch its bilingual XLIFF
+        # Document changed? fetch its bilingual XLIFF + push target lang
         if doc_guid != st.session_state.memoq_selected_document_guid:
             st.session_state.memoq_selected_document_guid = doc_guid
             st.session_state.memoq_selected_document_name = selected_doc.get("DocumentName")
-            st.session_state.memoq_selected_target_lang = selected_doc.get("TargetLangCode")
+            doc_target = _normalise_lang(selected_doc.get("TargetLangCode"))
+            st.session_state.memoq_selected_target_lang = doc_target
+
+            # Push the document's target language to sidebar state
+            if doc_target:
+                _set_detected_lang('target', doc_target)
+
+            # Re-affirm project source as well (in case state was cleared)
+            src_lang = _normalise_lang(selected_project.get("SourceLanguageCode"))
+            if src_lang:
+                _set_detected_lang('source', src_lang)
 
             with st.spinner(f"Exporting bilingual XLIFF for {selected_doc.get('DocumentName')}..."):
                 try:
