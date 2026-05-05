@@ -387,51 +387,65 @@ class MemoQProjectService:
         include_skeleton: bool = True,
     ) -> Tuple[bytes, str]:
         """
-        Export the document as a bilingual XLIFF.
+        Export the document as a bilingual XLIFF (runs silently in background).
 
         Returns:
             (xliff_bytes, suggested_filename) — xliff_bytes is the inner
             document.mqxliff if the server returned an .mqxlz ZIP, otherwise
             the raw XLIFF.
 
-        Uses four fallback strategies because memoQ server versions differ in
-        whether BilingualExportOptions is a named WSDL type or inline:
-          1. Named BilingualExportOptions type (standard WSDL)
-          2. Dict-style options (zeep resolves against inline element def)
-          3. Flat keyword parameters (some servers take them directly)
-          4. No explicit options (server default — last resort)
+        Four fallback strategies for cross-version WSDL compatibility:
+          1. docGuid + no options   (Mirage v12.2 signature)
+          2. documentGuid + no options   (standard WSDL naming)
+          3. docGuid + dict options   (docGuid servers that accept exportOptions)
+          4. documentGuid + dict options   (standard WSDL with options)
         """
         file_guid = None
         last_err: Optional[Exception] = None
 
-        # Strategy 1: Named BilingualExportOptions type
+        # Strategy 1: docGuid, no options — confirmed signature on Mirage v12.2
         try:
-            ExportOptions = self._project_client.get_type(
-                "{http://schemas.datacontract.org/2004/07/MemoQServices}"
-                "BilingualExportOptions"
-            )
-            FormatEnum = self._project_client.get_type(
-                "{http://schemas.datacontract.org/2004/07/MemoQServices}"
-                "BilingualDocFormat"
-            )
-            opts = ExportOptions(
-                BilingualDocFormat=FormatEnum("XLIFF"),
-                IncludeSkeleton=include_skeleton,
-                SaveCompressed=include_skeleton,
-                IncludeFullVersionHistory=False,
-                FillInUnconfirmedTranslations=False,
-            )
             file_guid = self._project_client.service.ExportTranslationDocument(
                 serverProjectGuid=project_guid,
-                documentGuid=document_guid,
-                exportOptions=opts,
+                docGuid=document_guid,
                 _soapheaders=self._hdr(),
             )
         except Exception as e:
             last_err = e
-            logger.debug("export strategy 1 (named type) failed: %s", e)
+            logger.debug("export strategy 1 (docGuid, no opts) failed: %s", e)
 
-        # Strategy 2: Dict-style options (zeep resolves against inline element)
+        # Strategy 2: documentGuid, no options — standard WSDL naming
+        if file_guid is None:
+            try:
+                file_guid = self._project_client.service.ExportTranslationDocument(
+                    serverProjectGuid=project_guid,
+                    documentGuid=document_guid,
+                    _soapheaders=self._hdr(),
+                )
+            except Exception as e:
+                last_err = e
+                logger.debug("export strategy 2 (documentGuid, no opts) failed: %s", e)
+
+        # Strategy 3: docGuid + dict options
+        if file_guid is None:
+            try:
+                file_guid = self._project_client.service.ExportTranslationDocument(
+                    serverProjectGuid=project_guid,
+                    docGuid=document_guid,
+                    exportOptions={
+                        'BilingualDocFormat': 'XLIFF',
+                        'IncludeSkeleton': include_skeleton,
+                        'SaveCompressed': include_skeleton,
+                        'IncludeFullVersionHistory': False,
+                        'FillInUnconfirmedTranslations': False,
+                    },
+                    _soapheaders=self._hdr(),
+                )
+            except Exception as e:
+                last_err = e
+                logger.debug("export strategy 3 (docGuid, dict opts) failed: %s", e)
+
+        # Strategy 4: documentGuid + dict options
         if file_guid is None:
             try:
                 file_guid = self._project_client.service.ExportTranslationDocument(
@@ -444,33 +458,6 @@ class MemoQProjectService:
                         'IncludeFullVersionHistory': False,
                         'FillInUnconfirmedTranslations': False,
                     },
-                    _soapheaders=self._hdr(),
-                )
-            except Exception as e:
-                last_err = e
-                logger.debug("export strategy 2 (dict opts) failed: %s", e)
-
-        # Strategy 3: Flat keyword parameters (older servers take them directly)
-        if file_guid is None:
-            try:
-                file_guid = self._project_client.service.ExportTranslationDocument(
-                    serverProjectGuid=project_guid,
-                    documentGuid=document_guid,
-                    bilingualDocFormat='XLIFF',
-                    saveCompressed=include_skeleton,
-                    includeSkeleton=include_skeleton,
-                    _soapheaders=self._hdr(),
-                )
-            except Exception as e:
-                last_err = e
-                logger.debug("export strategy 3 (flat kwargs) failed: %s", e)
-
-        # Strategy 4: No explicit options — server uses its default format
-        if file_guid is None:
-            try:
-                file_guid = self._project_client.service.ExportTranslationDocument(
-                    serverProjectGuid=project_guid,
-                    documentGuid=document_guid,
                     _soapheaders=self._hdr(),
                 )
             except Exception as e:
@@ -535,24 +522,49 @@ class MemoQProjectService:
         """
         upload_guid = self._upload_file(xliff_bytes, filename=filename)
 
+        # Try docGuid naming first (Mirage v12.2), then documentGuid (standard),
+        # then positional as last resort.
+        updated = False
+        last_err: Optional[Exception] = None
+
         try:
             self._project_client.service.UpdateTranslationDocumentFromBilingual(
                 serverProjectGuid=project_guid,
-                documentGuid=document_guid,
+                docGuid=document_guid,
                 fileGuid=upload_guid,
                 bilingualDocFormat="XLIFF",
                 _soapheaders=self._hdr(),
             )
-        except TypeError:
-            # Some older WSDLs use positional params
-            self._project_client.service.UpdateTranslationDocumentFromBilingual(
-                project_guid, document_guid, upload_guid, "XLIFF",
-                _soapheaders=self._hdr(),
-            )
+            updated = True
         except Exception as e:
-            raise RuntimeError(
-                f"UpdateTranslationDocumentFromBilingual failed: {e}"
-            ) from e
+            last_err = e
+            logger.debug("update strategy 1 (docGuid) failed: %s", e)
+
+        if not updated:
+            try:
+                self._project_client.service.UpdateTranslationDocumentFromBilingual(
+                    serverProjectGuid=project_guid,
+                    documentGuid=document_guid,
+                    fileGuid=upload_guid,
+                    bilingualDocFormat="XLIFF",
+                    _soapheaders=self._hdr(),
+                )
+                updated = True
+            except Exception as e:
+                last_err = e
+                logger.debug("update strategy 2 (documentGuid) failed: %s", e)
+
+        if not updated:
+            try:
+                self._project_client.service.UpdateTranslationDocumentFromBilingual(
+                    project_guid, document_guid, upload_guid, "XLIFF",
+                    _soapheaders=self._hdr(),
+                )
+                updated = True
+            except Exception as e:
+                raise RuntimeError(
+                    f"UpdateTranslationDocumentFromBilingual failed: {e}"
+                ) from e
 
         # Try to read back the new version number
         try:
