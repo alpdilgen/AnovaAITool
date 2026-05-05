@@ -294,8 +294,8 @@ class MemoQServerClient:
             tm_guid: Translation Memory GUID
             segments: List of source segments to lookup
             match_threshold: Minimum match percentage (50-102)
-            src_lang: Source language code (unused — TM already knows its languages)
-            tgt_lang: Target language code (unused — TM already knows its languages)
+            src_lang: Source language code (e.g., 'en', 'bg') — added to payload for language filtering
+            tgt_lang: Target language code (e.g., 'bg', 'tr') — added to payload for language filtering
             context_info: Optional list of dicts with context for each segment:
                           [{"preceding": "prev text", "following": "next text"}, ...]
                           Enables 101% context matching in memoQ TM.
@@ -303,10 +303,9 @@ class MemoQServerClient:
         Returns:
             Dict with normalized TMMatch objects: {segment_index: [TMMatch objects]}
         """
-        # Build payload according to memoQ REST API v1.
-        # NOTE: SourceLanguage / TargetLanguage are NOT sent at root level —
-        # the TM endpoint identifies its own languages from its configuration.
-        # Sending unknown root-level fields causes memoQ Server 500 errors.
+        # Build payload according to memoQ API v1 documentation
+        # IMPORTANT: Segments must be wrapped in <seg> XML tags
+        # Context fields (PrecedingSegment, FollowingSegment) enable 101% context matches
         segment_entries = []
         for i, seg in enumerate(segments):
             entry = {"Segment": f"<seg>{seg}</seg>"}
@@ -332,11 +331,19 @@ class MemoQServerClient:
             }
         }
 
+        # Add language filtering if provided
+        if src_lang:
+            payload["SourceLanguage"] = src_lang
+        if tgt_lang:
+            payload["TargetLanguage"] = tgt_lang
+
         endpoint = f"/tms/{tm_guid}/lookupsegments"
 
         try:
             logger.info(f"🔍 TM LOOKUP REQUEST:")
             logger.info(f"  TM GUID: {tm_guid}")
+            logger.info(f"  Source Lang: {src_lang}")
+            logger.info(f"  Target Lang: {tgt_lang}")
             logger.info(f"  Segments count: {len(segments)}")
             logger.info(f"  Match threshold: {match_threshold}")
             logger.debug(f"  Full payload: {payload}")

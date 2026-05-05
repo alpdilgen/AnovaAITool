@@ -308,7 +308,7 @@ class MemoQProjectService:
         if not target_lang_codes:
             try:
                 project = self._project_client.service.GetProject(
-                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
+                    spGuid=project_guid, _soapheaders=self._hdr()
                 )
                 pdict = self._zeep_to_dict(project)
                 target_lang_codes = _flatten_string_list(pdict.get("TargetLanguageCodes"))
