@@ -517,24 +517,45 @@ class MemoQProjectService:
         # Download the exported file (chunked)
         raw_bytes = self._download_file(file_guid)
 
-        # If it's a .mqxlz (ZIP), extract document.mqxliff
+        # If it's a .mqxlz (ZIP), extract the bilingual document
         suggested_name = "document.mqxliff"
         if raw_bytes[:2] == b"PK":
             try:
                 with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
-                    name_priority = [
-                        n for n in zf.namelist()
-                        if n.lower().endswith(".mqxliff")
-                    ] or [
-                        n for n in zf.namelist()
-                        if n.lower().endswith((".xliff", ".xlf"))
-                    ]
-                    if not name_priority:
+                    all_names = zf.namelist()
+                    logger.info("mqxlz contents: %s", all_names)
+
+                    # Priority: .mqxliff → .xliff/.xlf → .xml → XML content scan → any file
+                    candidates = (
+                        [n for n in all_names if n.lower().endswith(".mqxliff")]
+                        or [n for n in all_names if n.lower().endswith((".xliff", ".xlf"))]
+                        or [n for n in all_names if n.lower().endswith(".xml")]
+                    )
+
+                    # No extension match — scan file content for XML/XLIFF markers
+                    if not candidates:
+                        for name in all_names:
+                            if name.endswith("/"):
+                                continue
+                            try:
+                                head = zf.read(name)[:200]
+                                if b"<xliff" in head or head.lstrip()[:5] == b"<?xml":
+                                    candidates = [name]
+                                    break
+                            except Exception:
+                                continue
+
+                    # Last resort: take first non-directory entry
+                    if not candidates:
+                        candidates = [n for n in all_names if not n.endswith("/")]
+
+                    if not candidates:
                         raise RuntimeError(
-                            "mqxlz package contains no .mqxliff/.xliff entry"
+                            f"mqxlz package is empty. Contents: {all_names}"
                         )
-                    inner = name_priority[0]
-                    suggested_name = inner.split("/")[-1]
+
+                    inner = candidates[0]
+                    suggested_name = inner.split("/")[-1] or inner
                     raw_bytes = zf.read(inner)
             except zipfile.BadZipFile as e:
                 raise RuntimeError(
