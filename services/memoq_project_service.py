@@ -438,94 +438,59 @@ class MemoQProjectService:
 
         Returns (xliff_bytes, suggested_filename).
 
-        Uses the dedicated XLIFF bilingual export method:
-          ExportTranslationDocumentAsXliffBilingual(serverProjectGuid, docGuid, exportOptions)
+        Uses the dedicated XLIFF bilingual export method.
+        WSDL signature (verified from server error messages):
+          ExportTranslationDocumentAsXliffBilingual(
+              serverProjectGuid: guid, docGuid: guid,
+              options: XliffBilingualExportOptions)
 
-        Strategies (correct method first, generic fallback last):
-          1. ExportTranslationDocumentAsXliffBilingual — docGuid + XliffBilingualExportOptions
-          2. ExportTranslationDocumentAsXliffBilingual — documentGuid (alt param name)
-          3. ExportTranslationDocument — docGuid, no options (server default format)
-          4. ExportTranslationDocument — documentGuid, no options
+        Strategies:
+          1. ExportTranslationDocumentAsXliffBilingual(options=zeep-factory-obj)
+          2. ExportTranslationDocument (generic fallback — may return original format)
         """
         file_guid: Optional[str] = None
         last_err: Optional[Exception] = None
 
-        xliff_opts = {
-            'IncludeSkeleton': include_skeleton,
-            'SaveCompressed': include_skeleton,
-            'IncludeFullVersionHistory': False,
-        }
+        # Build options object using zeep factory so field names are validated
+        # against the XSD schema. Fallback to dict if factory fails.
+        # WSDL signature: ExportTranslationDocumentAsXliffBilingual(
+        #     serverProjectGuid: guid, docGuid: guid,
+        #     options: XliffBilingualExportOptions)
+        try:
+            opts_type = self._project_client.get_type(
+                '{http://kilgray.com/memoqservices/2007}XliffBilingualExportOptions'
+            )
+            opts_obj = opts_type(
+                IncludeSkeleton=include_skeleton,
+                SaveCompressed=include_skeleton,
+                IncludeFullVersionHistory=False,
+            )
+        except Exception as factory_err:
+            logger.warning("XliffBilingualExportOptions factory failed: %s — using dict", factory_err)
+            opts_obj = {
+                'IncludeSkeleton': include_skeleton,
+                'SaveCompressed': include_skeleton,
+                'IncludeFullVersionHistory': False,
+            }
 
-        # Strategy 1: XliffBilingual, docGuid, NO options (zeep can't always serialize dict to complex type)
+        # Strategy 1: dedicated XLIFF bilingual export (exact WSDL signature)
         try:
             raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
                 serverProjectGuid=project_guid,
                 docGuid=document_guid,
+                options=opts_obj,
                 _soapheaders=self._hdr(),
             )
             file_guid = _extract_guid(raw)
             if file_guid is None:
-                logger.warning("export strategy 1: no valid GUID in response — raw=%r", raw)
+                logger.warning("ExportTranslationDocumentAsXliffBilingual: no valid GUID — raw=%r", raw)
             else:
-                logger.info("export strategy 1 (XliffBilingual, docGuid, no-opts) succeeded")
+                logger.info("ExportTranslationDocumentAsXliffBilingual succeeded")
         except Exception as e:
             last_err = e
-            logger.warning("export strategy 1 (XliffBilingual, docGuid, no-opts) failed: %s", e)
+            logger.warning("ExportTranslationDocumentAsXliffBilingual failed: %s", e)
 
-        # Strategy 2: XliffBilingual, documentGuid, NO options
-        if file_guid is None:
-            try:
-                raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
-                    serverProjectGuid=project_guid,
-                    documentGuid=document_guid,
-                    _soapheaders=self._hdr(),
-                )
-                file_guid = _extract_guid(raw)
-                if file_guid is None:
-                    logger.warning("export strategy 2: no valid GUID in response — raw=%r", raw)
-                else:
-                    logger.info("export strategy 2 (XliffBilingual, documentGuid, no-opts) succeeded")
-            except Exception as e:
-                last_err = e
-                logger.warning("export strategy 2 (XliffBilingual, documentGuid, no-opts) failed: %s", e)
-
-        # Strategy 3: XliffBilingual, docGuid, WITH options dict
-        if file_guid is None:
-            try:
-                raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
-                    serverProjectGuid=project_guid,
-                    docGuid=document_guid,
-                    exportOptions=xliff_opts,
-                    _soapheaders=self._hdr(),
-                )
-                file_guid = _extract_guid(raw)
-                if file_guid is None:
-                    logger.warning("export strategy 3: no valid GUID in response — raw=%r", raw)
-                else:
-                    logger.info("export strategy 3 (XliffBilingual, docGuid, with-opts) succeeded")
-            except Exception as e:
-                last_err = e
-                logger.warning("export strategy 3 (XliffBilingual, docGuid, with-opts) failed: %s", e)
-
-        # Strategy 4: XliffBilingual, documentGuid, WITH options dict
-        if file_guid is None:
-            try:
-                raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
-                    serverProjectGuid=project_guid,
-                    documentGuid=document_guid,
-                    exportOptions=xliff_opts,
-                    _soapheaders=self._hdr(),
-                )
-                file_guid = _extract_guid(raw)
-                if file_guid is None:
-                    logger.warning("export strategy 4: no valid GUID in response — raw=%r", raw)
-                else:
-                    logger.info("export strategy 4 (XliffBilingual, documentGuid, with-opts) succeeded")
-            except Exception as e:
-                last_err = e
-                logger.warning("export strategy 4 (XliffBilingual, documentGuid, with-opts) failed: %s", e)
-
-        # Strategy 5: generic export — docGuid (server default format, last resort)
+        # Strategy 2: generic primary-format export (last resort — may return original file format)
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
@@ -535,29 +500,12 @@ class MemoQProjectService:
                 )
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
-                    logger.warning("export strategy 5: no valid GUID — raw=%r", raw)
+                    logger.warning("ExportTranslationDocument: no valid GUID — raw=%r", raw)
                 else:
-                    logger.warning("export strategy 5 (generic, docGuid) succeeded — format may not be XLIFF")
+                    logger.warning("ExportTranslationDocument (generic) succeeded — format may not be XLIFF")
             except Exception as e:
                 last_err = e
-                logger.warning("export strategy 5 (generic, docGuid) failed: %s", e)
-
-        # Strategy 6: generic export — documentGuid
-        if file_guid is None:
-            try:
-                raw = self._project_client.service.ExportTranslationDocument(
-                    serverProjectGuid=project_guid,
-                    documentGuid=document_guid,
-                    _soapheaders=self._hdr(),
-                )
-                file_guid = _extract_guid(raw)
-                if file_guid is None:
-                    logger.warning("export strategy 6: no valid GUID — raw=%r", raw)
-                else:
-                    logger.warning("export strategy 6 (generic, documentGuid) succeeded — format may not be XLIFF")
-            except Exception as e:
-                last_err = e
-                logger.warning("export strategy 6 (generic, documentGuid) failed: %s", e)
+                logger.warning("ExportTranslationDocument failed: %s", e)
 
         if not file_guid:
             raise RuntimeError(

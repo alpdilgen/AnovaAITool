@@ -163,6 +163,8 @@ class MemoQUI:
             'memoq_selected_target_lang': None,
             'project_search_filter': "",
             'document_search_filter': "",
+            'available_tms': [],
+            'available_tbs': [],
         }.items():
             if k not in st.session_state:
                 st.session_state[k] = v
@@ -310,17 +312,22 @@ class MemoQUI:
                         tgt_base = _base(tgt_lang_for_lookup) if tgt_lang_for_lookup else None
 
                         all_tms = rest_client.list_tms()
-                        tm_guids = []
+                        matching_tms = []
                         for tm in (all_tms or []):
                             tm_src = _base(tm.get('SourceLangCode') or '')
                             tm_tgt = _base(tm.get('TargetLangCode') or '')
                             if tm_src == src_base and (tgt_base is None or tm_tgt == tgt_base):
                                 guid = tm.get('TMGuid') or tm.get('tmGuid')
                                 if guid:
-                                    tm_guids.append(str(guid))
+                                    matching_tms.append({
+                                        'guid': str(guid),
+                                        'name': tm.get('Name') or tm.get('name') or str(guid)[:8],
+                                        'src': tm.get('SourceLangCode', '?'),
+                                        'tgt': tm.get('TargetLangCode', '?'),
+                                    })
 
                         all_tbs = rest_client.list_tbs()
-                        tb_guids = []
+                        matching_tbs = []
                         for tb in (all_tbs or []):
                             tb_lang_bases = [_base(l) for l in (tb.get('Languages') or [])]
                             if src_base in tb_lang_bases and (
@@ -328,23 +335,23 @@ class MemoQUI:
                             ):
                                 guid = tb.get('TBGuid') or tb.get('tbGuid')
                                 if guid:
-                                    tb_guids.append(str(guid))
+                                    matching_tbs.append({
+                                        'guid': str(guid),
+                                        'name': tb.get('Name') or tb.get('name') or str(guid)[:8],
+                                        'langs': ', '.join(tb.get('Languages') or []),
+                                    })
 
-                        st.session_state.selected_tm_guids = tm_guids
-                        st.session_state.selected_tb_guids = tb_guids
-                        st.caption(
-                            f"Auto-selected {len(tm_guids)} TM(s) and {len(tb_guids)} TB(s) "
-                            f"for {src_lang}→{tgt_lang_for_lookup or '?'}"
-                        )
+                        st.session_state.available_tms = matching_tms
+                        st.session_state.available_tbs = matching_tbs
+                        st.session_state.selected_tm_guids = [t['guid'] for t in matching_tms]
+                        st.session_state.selected_tb_guids = [t['guid'] for t in matching_tbs]
                     else:
-                        # Fallback: SOAP project-assigned resources
+                        # Fallback: SOAP project-assigned resources (no names available)
                         tm_guids, tb_guids = proj_service.get_project_resources(proj_guid)
+                        st.session_state.available_tms = [{'guid': g, 'name': g[:8], 'src': '?', 'tgt': '?'} for g in tm_guids]
+                        st.session_state.available_tbs = [{'guid': g, 'name': g[:8], 'langs': '?'} for g in tb_guids]
                         st.session_state.selected_tm_guids = tm_guids
                         st.session_state.selected_tb_guids = tb_guids
-                        st.caption(
-                            f"Auto-selected {len(tm_guids)} TM(s) and {len(tb_guids)} TB(s) "
-                            f"from project assignment"
-                        )
                 except Exception as e:
                     logger.warning("TM/TB lookup failed: %s", e)
                     st.session_state.selected_tm_guids = []
@@ -439,17 +446,45 @@ class MemoQUI:
                     st.session_state.last_xliff_bytes = None
 
         # ---- Show summary ---------------------------------------------
-        cols = st.columns(3)
+        cols = st.columns(2)
         with cols[0]:
             st.metric("Project", selected_project.get("Name", "?"))
         with cols[1]:
             st.metric("Document", selected_doc.get("DocumentName", "?"))
-        with cols[2]:
-            st.metric(
-                "TM/TB auto-selected",
-                f"{len(st.session_state.get('selected_tm_guids') or [])}/"
-                f"{len(st.session_state.get('selected_tb_guids') or [])}",
+
+        # ---- TM/TB selection -----------------------------------------
+        available_tms = st.session_state.get('available_tms') or []
+        available_tbs = st.session_state.get('available_tbs') or []
+
+        if available_tms:
+            tm_options = {
+                f"{t['name']}  [{t['src']}→{t['tgt']}]": t['guid']
+                for t in available_tms
+            }
+            selected_tm_labels = st.multiselect(
+                f"Translation Memories ({len(available_tms)} matching)",
+                options=list(tm_options.keys()),
+                default=list(tm_options.keys()),
+                key=f"tm_sel_{proj_guid}",
             )
+            st.session_state.selected_tm_guids = [tm_options[n] for n in selected_tm_labels]
+        else:
+            st.caption("No TMs found for this language pair.")
+
+        if available_tbs:
+            tb_options = {
+                f"{t['name']}  [{t['langs']}]": t['guid']
+                for t in available_tbs
+            }
+            selected_tb_labels = st.multiselect(
+                f"Termbases ({len(available_tbs)} matching)",
+                options=list(tb_options.keys()),
+                default=list(tb_options.keys()),
+                key=f"tb_sel_{proj_guid}",
+            )
+            st.session_state.selected_tb_guids = [tb_options[n] for n in selected_tb_labels]
+        else:
+            st.caption("No TBs found for this language pair.")
 
         return proj_guid, selected_doc
 
