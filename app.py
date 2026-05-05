@@ -640,6 +640,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         total_segments = len(segments)
         st.write(f"✅ Loaded {total_segments} segments")
 
+        if total_segments == 0:
+            st.error(
+                "⚠️ No translatable segments found in the exported document. "
+                "The server may have exported in a non-XLIFF format (e.g. DOCX table). "
+                "Check the Streamlit log for 'mqxlz contents:' to see what was inside the ZIP."
+            )
+            return
+
         st.session_state.segment_objects = {seg.id: seg for seg in segments}
         st.session_state.chat_history = []
 
@@ -1216,10 +1224,11 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         logger.log("TRANSLATION JOB SUMMARY")
         logger.log("="*80)
         logger.log(f"Total Segments: {total_segments}")
-        logger.log(f"✓ Bypass (≥95%): {len(bypass_segments)} ({len(bypass_segments)/total_segments*100:.1f}%)")
-        logger.log(f"✓ With TM Context (60-94%): {len(tm_context)} ({len(tm_context)/total_segments*100:.1f}%)")
+        _pct = lambda n: f"{n/total_segments*100:.1f}%" if total_segments else "N/A"
+        logger.log(f"✓ Bypass (≥95%): {len(bypass_segments)} ({_pct(len(bypass_segments))})")
+        logger.log(f"✓ With TM Context (60-94%): {len(tm_context)} ({_pct(len(tm_context))})")
         llm_only_count = len(llm_segments) - len(tm_context)
-        logger.log(f"✓ LLM Only (<60%): {llm_only_count} ({llm_only_count/total_segments*100:.1f}%)")
+        logger.log(f"✓ LLM Only (<60%): {llm_only_count} ({_pct(llm_only_count)})")
         logger.log(f"Processing Time: {duration:.1f} seconds")
         logger.log(f"Batch Size: {batch_size} segments")
         num_batches = (len(llm_segments) + batch_size - 1) // batch_size if llm_segments else 0
