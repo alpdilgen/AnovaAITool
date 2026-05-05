@@ -427,59 +427,60 @@ class MemoQProjectService:
 
         Returns (xliff_bytes, suggested_filename).
 
-        ExportTranslationDocument may return either a bare GUID string or a
-        complex result object depending on the server version. _extract_guid()
-        handles both cases by scanning for a UUID-formatted string.
+        Uses the dedicated XLIFF bilingual export method:
+          ExportTranslationDocumentAsXliffBilingual(serverProjectGuid, docGuid, exportOptions)
 
-        Strategies (XLIFF-with-options tried first, no-options as fallback):
-          1. docGuid + XLIFF exportOptions   (preferred: forces XLIFF format)
-          2. documentGuid + XLIFF exportOptions
-          3. docGuid, no options             (fallback: server default format)
-          4. documentGuid, no options
+        Strategies (correct method first, generic fallback last):
+          1. ExportTranslationDocumentAsXliffBilingual — docGuid + XliffBilingualExportOptions
+          2. ExportTranslationDocumentAsXliffBilingual — documentGuid (alt param name)
+          3. ExportTranslationDocument — docGuid, no options (server default format)
+          4. ExportTranslationDocument — documentGuid, no options
         """
         file_guid: Optional[str] = None
         last_err: Optional[Exception] = None
 
-        export_opts = {
-            'BilingualDocFormat': 'XLIFF',
+        xliff_opts = {
             'IncludeSkeleton': include_skeleton,
             'SaveCompressed': include_skeleton,
             'IncludeFullVersionHistory': False,
-            'FillInUnconfirmedTranslations': False,
         }
 
-        # Strategy 1: docGuid + XLIFF options (preferred — forces XLIFF format)
+        # Strategy 1: dedicated XLIFF bilingual export — docGuid
         try:
-            raw = self._project_client.service.ExportTranslationDocument(
+            raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
                 serverProjectGuid=project_guid,
                 docGuid=document_guid,
-                exportOptions=export_opts,
+                exportOptions=xliff_opts,
                 _soapheaders=self._hdr(),
             )
             file_guid = _extract_guid(raw)
             if file_guid is None:
                 logger.debug("export strategy 1: result has no GUID — raw=%r", raw)
+            else:
+                logger.info("export strategy 1 (XliffBilingual, docGuid) succeeded")
         except Exception as e:
             last_err = e
-            logger.debug("export strategy 1 (docGuid, XLIFF opts) failed: %s", e)
+            logger.debug("export strategy 1 (XliffBilingual, docGuid) failed: %s", e)
 
-        # Strategy 2: documentGuid + XLIFF options
+        # Strategy 2: dedicated XLIFF bilingual export — documentGuid (alt param name)
         if file_guid is None:
             try:
-                raw = self._project_client.service.ExportTranslationDocument(
+                raw = self._project_client.service.ExportTranslationDocumentAsXliffBilingual(
                     serverProjectGuid=project_guid,
                     documentGuid=document_guid,
-                    exportOptions=export_opts,
+                    exportOptions=xliff_opts,
                     _soapheaders=self._hdr(),
                 )
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
                     logger.debug("export strategy 2: result has no GUID — raw=%r", raw)
+                else:
+                    logger.info("export strategy 2 (XliffBilingual, documentGuid) succeeded")
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 2 (documentGuid, XLIFF opts) failed: %s", e)
+                logger.debug("export strategy 2 (XliffBilingual, documentGuid) failed: %s", e)
 
-        # Strategy 3: docGuid, no options (fallback — uses server default format)
+        # Strategy 3: generic export — docGuid, no options (server default format)
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
@@ -490,11 +491,13 @@ class MemoQProjectService:
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
                     logger.debug("export strategy 3: result has no GUID — raw=%r", raw)
+                else:
+                    logger.warning("export strategy 3 (generic, docGuid) succeeded — format may not be XLIFF")
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 3 (docGuid, no opts) failed: %s", e)
+                logger.debug("export strategy 3 (generic, docGuid) failed: %s", e)
 
-        # Strategy 4: documentGuid, no options
+        # Strategy 4: generic export — documentGuid, no options
         if file_guid is None:
             try:
                 raw = self._project_client.service.ExportTranslationDocument(
@@ -505,13 +508,15 @@ class MemoQProjectService:
                 file_guid = _extract_guid(raw)
                 if file_guid is None:
                     logger.debug("export strategy 4: result has no GUID — raw=%r", raw)
+                else:
+                    logger.warning("export strategy 4 (generic, documentGuid) succeeded — format may not be XLIFF")
             except Exception as e:
                 last_err = e
-                logger.debug("export strategy 4 (documentGuid, no opts) failed: %s", e)
+                logger.debug("export strategy 4 (generic, documentGuid) failed: %s", e)
 
         if not file_guid:
             raise RuntimeError(
-                f"ExportTranslationDocument failed: {last_err}"
+                f"ExportTranslationDocumentAsXliffBilingual failed: {last_err}"
             )
 
         # Download the exported file (chunked)
