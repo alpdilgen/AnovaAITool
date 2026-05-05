@@ -296,15 +296,45 @@ class MemoQUI:
                     logger.error("list_documents error: %s", e, exc_info=True)
 
                 try:
-                    tm_guids, tb_guids = proj_service.get_project_resources(proj_guid)
-                    st.session_state.selected_tm_guids = tm_guids
-                    st.session_state.selected_tb_guids = tb_guids
-                    st.caption(
-                        f"Auto-selected {len(tm_guids)} TM(s) and {len(tb_guids)} TB(s) "
-                        f"from project assignment"
-                    )
+                    rest_client = st.session_state.get('memoq_client')
+                    tgt_lang_for_lookup = target_lang_codes[0] if target_lang_codes else None
+
+                    if rest_client and src_lang:
+                        # REST API: list server TMs/TBs for this language pair
+                        tms = rest_client.list_tms(
+                            src_lang=src_lang,
+                            tgt_lang=tgt_lang_for_lookup,
+                        )
+                        tm_guids = [
+                            str(tm.get('TMGuid') or tm.get('tmGuid') or '')
+                            for tm in (tms or [])
+                            if tm.get('TMGuid') or tm.get('tmGuid')
+                        ]
+                        tbs = rest_client.list_tbs(
+                            languages=([src_lang] + (target_lang_codes or [])) or None,
+                        )
+                        tb_guids = [
+                            str(tb.get('TBGuid') or tb.get('tbGuid') or '')
+                            for tb in (tbs or [])
+                            if tb.get('TBGuid') or tb.get('tbGuid')
+                        ]
+                        st.session_state.selected_tm_guids = tm_guids
+                        st.session_state.selected_tb_guids = tb_guids
+                        st.caption(
+                            f"Auto-selected {len(tm_guids)} TM(s) and {len(tb_guids)} TB(s) "
+                            f"for {src_lang}→{tgt_lang_for_lookup or '?'}"
+                        )
+                    else:
+                        # Fallback: SOAP project-assigned resources
+                        tm_guids, tb_guids = proj_service.get_project_resources(proj_guid)
+                        st.session_state.selected_tm_guids = tm_guids
+                        st.session_state.selected_tb_guids = tb_guids
+                        st.caption(
+                            f"Auto-selected {len(tm_guids)} TM(s) and {len(tb_guids)} TB(s) "
+                            f"from project assignment"
+                        )
                 except Exception as e:
-                    logger.warning("get_project_resources failed: %s", e)
+                    logger.warning("TM/TB lookup failed: %s", e)
                     st.session_state.selected_tm_guids = []
                     st.session_state.selected_tb_guids = []
             # Force a rerun so the document picker + language sidebar refresh
