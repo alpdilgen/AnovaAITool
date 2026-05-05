@@ -732,11 +732,11 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 orig_idx = _seg_index_map.get(seg.id)
                 if orig_idx is not None:
                     if orig_idx > 0:
-                        prev_src = segments[orig_idx - 1].source
+                        prev_src = normalize_segment_for_matching(segments[orig_idx - 1].source)
                         if prev_src:
                             ctx["preceding"] = prev_src
                     if orig_idx < len(segments) - 1:
-                        next_src = segments[orig_idx + 1].source
+                        next_src = normalize_segment_for_matching(segments[orig_idx + 1].source)
                         if next_src:
                             ctx["following"] = next_src
                 ctx_list.append(ctx)
@@ -748,7 +748,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
 
                 for batch_start in range(0, len(remaining), BATCH_SIZE):
                     batch = remaining[batch_start:batch_start + BATCH_SIZE]
-                    normalized_sources = [s.source for s in batch]
+                    normalized_sources = [normalize_segment_for_matching(s.source) for s in batch]
                     batch_context = _build_context_for_batch(batch)
 
                     try:
