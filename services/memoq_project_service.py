@@ -463,14 +463,14 @@ class MemoQProjectService:
             opts_obj = opts_type(
                 IncludeSkeleton=include_skeleton,
                 SaveCompressed=include_skeleton,
-                IncludeFullVersionHistory=False,
+                FullVersionHistory=False,
             )
         except Exception as factory_err:
             logger.warning("XliffBilingualExportOptions factory failed: %s — using dict", factory_err)
             opts_obj = {
                 'IncludeSkeleton': include_skeleton,
                 'SaveCompressed': include_skeleton,
-                'IncludeFullVersionHistory': False,
+                'FullVersionHistory': False,
             }
 
         # Strategy 1: dedicated XLIFF bilingual export (exact WSDL signature)
