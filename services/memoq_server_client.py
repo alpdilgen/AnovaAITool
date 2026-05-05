@@ -91,7 +91,7 @@ class MemoQServerClient:
     REST API client for memoQ Server
     Handles Authentication, TM, and TB operations
     """
-    
+
     def __init__(
         self,
         server_url: str,
@@ -102,7 +102,7 @@ class MemoQServerClient:
     ):
         """
         Initialize memoQ Server connection
-        
+
         Args:
             server_url: Base URL (e.g., https://mirage.memoq.com:8091/adaturkey)
             username: memoQ username
@@ -116,14 +116,14 @@ class MemoQServerClient:
         self.verify_ssl = verify_ssl
         self.timeout = timeout
         self.base_path = "/memoqserverhttpapi/v1"
-        
+
         self.token = None
         self.token_expiry = None
         self.token_buffer = 300  # 5 min buffer
-        
+
         self._tm_cache = {}
         self._tb_cache = {}
-    
+
     def login(self) -> bool:
         """Authenticate with memoQ Server"""
         url = f"{self.server_url}{self.base_path}/auth/login"
@@ -132,7 +132,7 @@ class MemoQServerClient:
             "Password": self.password,
             "LoginMode": 0
         }
-        
+
         try:
             response = requests.post(
                 url,
@@ -142,29 +142,29 @@ class MemoQServerClient:
                 timeout=self.timeout
             )
             response.raise_for_status()
-            
+
             data = response.json()
             self.token = data.get("AccessToken")
             self.token_expiry = datetime.now() + timedelta(minutes=55)
-            
+
             logger.info(f"✓ Authenticated as {data.get('Name')}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Login failed: {e}")
             raise Exception(f"Authentication failed: {str(e)}")
-    
+
     def _ensure_token(self) -> bool:
         """Ensure token is valid"""
         if self.token is None:
             return self.login()
-        
+
         if datetime.now() > (self.token_expiry - timedelta(seconds=self.token_buffer)):
             logger.warning("Token expiring, refreshing...")
             return self.login()
-        
+
         return True
-    
+
     def _make_request(
         self,
         method: str,
@@ -175,7 +175,7 @@ class MemoQServerClient:
         """Make REST API request"""
         if not self._ensure_token():
             raise Exception("Authentication failed")
-        
+
         url = f"{self.server_url}{self.base_path}{endpoint}"
 
         # Use Authorization header (best practice per memoQ API docs)
@@ -249,9 +249,9 @@ class MemoQServerClient:
         except Exception as e:
             logger.error(f"Request failed: {str(e)}")
             raise Exception(f"Request failed: {str(e)}")
-    
+
     # ==================== TRANSLATION MEMORY ====================
-    
+
     def list_tms(
         self,
         src_lang: Optional[str] = None,
@@ -260,24 +260,24 @@ class MemoQServerClient:
     ) -> List[Dict]:
         """List all Translation Memories"""
         cache_key = f"tms_{src_lang}_{tgt_lang}"
-        
+
         if not force_refresh and cache_key in self._tm_cache:
             return self._tm_cache[cache_key]
-        
+
         endpoint = "/tms"
         params = {}
-        
+
         if src_lang:
             params["srcLang"] = src_lang
         if tgt_lang:
             params["targetLang"] = tgt_lang
-        
+
         result = self._make_request("GET", endpoint, params=params if params else None)
         self._tm_cache[cache_key] = result
-        
+
         logger.info(f"Listed {len(result)} TMs")
         return result
-    
+
     def lookup_segments(
         self,
         tm_guid: str,
@@ -294,8 +294,8 @@ class MemoQServerClient:
             tm_guid: Translation Memory GUID
             segments: List of source segments to lookup
             match_threshold: Minimum match percentage (50-102)
-            src_lang: Source language code (e.g., 'eng')
-            tgt_lang: Target language code (e.g., 'tur')
+            src_lang: Source language code (unused — TM already knows its languages)
+            tgt_lang: Target language code (unused — TM already knows its languages)
             context_info: Optional list of dicts with context for each segment:
                           [{"preceding": "prev text", "following": "next text"}, ...]
                           Enables 101% context matching in memoQ TM.
@@ -303,9 +303,10 @@ class MemoQServerClient:
         Returns:
             Dict with normalized TMMatch objects: {segment_index: [TMMatch objects]}
         """
-        # Build payload according to memoQ API v1 documentation
-        # IMPORTANT: Segments must be wrapped in <seg> XML tags
-        # Context fields (PrecedingSegment, FollowingSegment) enable 101% context matches
+        # Build payload according to memoQ REST API v1.
+        # NOTE: SourceLanguage / TargetLanguage are NOT sent at root level —
+        # the TM endpoint identifies its own languages from its configuration.
+        # Sending unknown root-level fields causes memoQ Server 500 errors.
         segment_entries = []
         for i, seg in enumerate(segments):
             entry = {"Segment": f"<seg>{seg}</seg>"}
@@ -331,19 +332,11 @@ class MemoQServerClient:
             }
         }
 
-        # Add language filtering if provided
-        if src_lang:
-            payload["SourceLanguage"] = src_lang
-        if tgt_lang:
-            payload["TargetLanguage"] = tgt_lang
-        
         endpoint = f"/tms/{tm_guid}/lookupsegments"
 
         try:
             logger.info(f"🔍 TM LOOKUP REQUEST:")
             logger.info(f"  TM GUID: {tm_guid}")
-            logger.info(f"  Source Lang: {src_lang}")
-            logger.info(f"  Target Lang: {tgt_lang}")
             logger.info(f"  Segments count: {len(segments)}")
             logger.info(f"  Match threshold: {match_threshold}")
             logger.debug(f"  Full payload: {payload}")
@@ -353,7 +346,7 @@ class MemoQServerClient:
             logger.info(f"📥 TM LOOKUP RESPONSE:")
             logger.info(f"  Raw response type: {type(result)}")
             logger.info(f"  Full response: {result}")
-            
+
             if result and isinstance(result, dict):
                 result_list = result.get("Result", [])
                 logger.info(f"TM lookup Result count: {len(result_list) if result_list else 0}")
@@ -378,9 +371,9 @@ class MemoQServerClient:
         except Exception as e:
             logger.error(f"TM lookup error: {e}", exc_info=True)
             return {}
-    
+
     # ==================== TERMBASE ====================
-    
+
     def list_tbs(
         self,
         languages: Optional[List[str]] = None,
@@ -388,19 +381,18 @@ class MemoQServerClient:
     ) -> List[Dict]:
         """List all Termbases"""
         cache_key = f"tbs_{'_'.join(languages or [])}"
-        
+
         if not force_refresh and cache_key in self._tb_cache:
             return self._tb_cache[cache_key]
-        
+
         endpoint = "/tbs"
         params = None
-        
+
         if languages:
             params = {f"lang[{i}]": lang for i, lang in enumerate(languages)}
-        
+
         result = self._make_request("GET", endpoint, params=params)
         self._tb_cache[cache_key] = result
 
         logger.info(f"Listed {len(result)} TBs")
         return result
-

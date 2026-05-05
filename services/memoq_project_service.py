@@ -6,7 +6,7 @@ Wraps the WSAPI ServerProjectService and FileManagerService for:
   - Listing translation documents in a project
   - Exporting bilingual (.mqxlz, unzipped to .mqxliff bytes)
   - Re-importing a corrected bilingual XLIFF via
-    UpdateTranslationDocumentFromBilingual(projectGuid, fileGuid, "XLIFF")
+    ImportBilingualTranslationDocument(projectGuid, fileGuid, XLIFF, targetLangCodes)
   - Discovering the TM and TB GUIDs assigned to a project (REST helper)
 
 Authentication
@@ -21,7 +21,7 @@ Bilingual round-trip (proven live, v1.10 -> v1.12)
 2. unzip in-memory -> document.mqxliff
 3. (caller modifies the XLIFF, e.g. translation results, Verifika fixes)
 4. BeginChunkedFileUpload + AddNextFileChunk + EndChunkedFileUpload -> uploadFileGuid
-5. UpdateTranslationDocumentFromBilingual(projectGuid, uploadFileGuid, "XLIFF")
+5. ImportBilingualTranslationDocument(projectGuid, uploadFileGuid, XLIFF, targetLangCodes)
 """
 
 from __future__ import annotations
@@ -300,6 +300,10 @@ class MemoQProjectService:
         """
         List translation documents in a project. Returns dicts with:
           DocumentGuid, DocumentName, TargetLangCode, WorkflowStatus, Version
+
+        Uses ListProjectTranslationDocuments (v1 only).
+        ListProjectTranslationDocuments2 is NOT called — it requires an options
+        object and raises NullReferenceException when called without one.
         """
         if not target_lang_codes:
             try:
@@ -342,7 +346,7 @@ class MemoQProjectService:
                     "_raw": dd,
                 }
 
-        # Strategy 0 — plain ListProjectTranslationDocuments
+        # Strategy 0 — ListProjectTranslationDocuments (v1)
         try:
             res = self._project_client.service.ListProjectTranslationDocuments(
                 serverProjectGuid=project_guid, _soapheaders=self._hdr()
@@ -350,51 +354,7 @@ class MemoQProjectService:
             _collect(res)
         except Exception as e:
             last_error = e
-            logger.warning("list_documents strategy 0 (ListProjectTranslationDocuments) failed: %s", e)
-
-        # Strategy 0b — "2" variant, no extra args
-        if not results_by_guid:
-            try:
-                res = self._project_client.service.ListProjectTranslationDocuments2(
-                    serverProjectGuid=project_guid, _soapheaders=self._hdr()
-                )
-                _collect(res)
-            except Exception as e:
-                last_error = e
-                logger.warning("list_documents strategy 0b (ListProjectTranslationDocuments2) failed: %s", e)
-
-        # Strategy A — per target language with various kwarg spellings
-        if not results_by_guid:
-            for tlc in (target_lang_codes or []):
-                if not tlc:
-                    continue
-                for kwarg_name in ("targetLangCode", "targetLanguageCode", "languageCode"):
-                    try:
-                        kwargs = {"serverProjectGuid": project_guid, kwarg_name: tlc}
-                        res = self._project_client.service.ListProjectTranslationDocuments2(
-                            **kwargs, _soapheaders=self._hdr()
-                        )
-                        _collect(res)
-                        break
-                    except TypeError:
-                        continue
-                    except Exception as e:
-                        last_error = e
-                        break
-                else:
-                    for kwarg_name in ("targetLangCode", "targetLanguageCode", "languageCode"):
-                        try:
-                            kwargs = {"serverProjectGuid": project_guid, kwarg_name: tlc}
-                            res = self._project_client.service.ListProjectTranslationDocuments(
-                                **kwargs, _soapheaders=self._hdr()
-                            )
-                            _collect(res)
-                            break
-                        except TypeError:
-                            continue
-                        except Exception as e:
-                            last_error = e
-                            break
+            logger.warning("list_documents (ListProjectTranslationDocuments) failed: %s", e)
 
         # Strategy C — grouped-by-source-file fallback
         if not results_by_guid:
@@ -575,63 +535,54 @@ class MemoQProjectService:
         document_guid: str,
         xliff_bytes: bytes,
         filename: str = "translated.mqxliff",
+        target_lang_codes: Optional[List[str]] = None,
     ) -> Optional[int]:
         """
-        Push a corrected XLIFF back into the project document.
+        Push a corrected XLIFF back into the project document via
+        ImportBilingualTranslationDocument (the correct WSDL method).
         Returns the new document version number (if available), else None.
+
+        WSDL signature:
+          ImportBilingualTranslationDocument(
+              Guid serverProjectGuid,
+              Guid fileGuid,
+              BilingualDocFormat docFormat,   -- "XLIFF"
+              string[] targetLangCodes)
         """
+        # Resolve target lang codes from the document list if not supplied
+        if not target_lang_codes:
+            try:
+                docs = self.list_documents(project_guid)
+                for d in docs:
+                    if str(d.get("DocumentGuid")) == str(document_guid):
+                        tlc = d.get("TargetLangCode")
+                        if tlc:
+                            target_lang_codes = [tlc]
+                        break
+            except Exception as e:
+                logger.warning("Could not resolve target lang codes for import: %s", e)
+
         upload_guid = self._upload_file(xliff_bytes, filename=filename)
 
-        updated = False
-        last_err: Optional[Exception] = None
-
-        # Strategy 1: docGuid naming (Mirage v12.2)
         try:
-            self._project_client.service.UpdateTranslationDocumentFromBilingual(
+            result = self._project_client.service.ImportBilingualTranslationDocument(
                 serverProjectGuid=project_guid,
-                docGuid=document_guid,
                 fileGuid=upload_guid,
-                bilingualDocFormat="XLIFF",
+                docFormat="XLIFF",
+                targetLangCodes=target_lang_codes or [],
                 _soapheaders=self._hdr(),
             )
-            updated = True
+            logger.info("ImportBilingualTranslationDocument succeeded: %r", result)
         except Exception as e:
-            last_err = e
-            logger.debug("update strategy 1 (docGuid) failed: %s", e)
-
-        # Strategy 2: documentGuid naming (standard WSDL)
-        if not updated:
-            try:
-                self._project_client.service.UpdateTranslationDocumentFromBilingual(
-                    serverProjectGuid=project_guid,
-                    documentGuid=document_guid,
-                    fileGuid=upload_guid,
-                    bilingualDocFormat="XLIFF",
-                    _soapheaders=self._hdr(),
-                )
-                updated = True
-            except Exception as e:
-                last_err = e
-                logger.debug("update strategy 2 (documentGuid) failed: %s", e)
-
-        # Strategy 3: positional args
-        if not updated:
-            try:
-                self._project_client.service.UpdateTranslationDocumentFromBilingual(
-                    project_guid, document_guid, upload_guid, "XLIFF",
-                    _soapheaders=self._hdr(),
-                )
-                updated = True
-            except Exception as e:
-                raise RuntimeError(
-                    f"UpdateTranslationDocumentFromBilingual failed: {e}"
-                ) from e
+            raise RuntimeError(
+                f"ImportBilingualTranslationDocument failed: {e}"
+            ) from e
 
         # Read back the new version number
         try:
             docs = self.list_documents(project_guid)
             for d in docs:
-                if d.get("DocumentGuid") == document_guid:
+                if str(d.get("DocumentGuid")) == str(document_guid):
                     return d.get("Version")
         except Exception:
             pass
@@ -687,11 +638,14 @@ class MemoQProjectService:
     # ------------------------------------------------------------------ #
 
     def _download_file(self, file_guid: str) -> bytes:
-        # BeginChunkedFileDownload returns a sessionId (separate from fileGuid).
-        # GetNextFileChunk and EndChunkedFileDownload take sessionId, not fileGuid.
+        """
+        Download a server-side temp file by GUID.
+        WSDL: BeginChunkedFileDownload(string fileGuid, bool zip) -> {Guid guid, ...}
+        After download, calls DeleteFile to clean up the server-side temp file.
+        """
         try:
             raw = self._file_client.service.BeginChunkedFileDownload(
-                fileGuid=file_guid, _soapheaders=self._hdr()
+                fileGuid=file_guid, zip=False, _soapheaders=self._hdr()
             )
             session_id = _extract_guid(raw) or str(raw)
         except Exception as e:
@@ -717,11 +671,26 @@ class MemoQProjectService:
                 )
             except Exception:
                 pass
+
+        try:
+            self._file_client.service.DeleteFile(
+                fileGuid=file_guid, _soapheaders=self._hdr()
+            )
+        except Exception as e:
+            logger.warning("DeleteFile failed for %s: %s", file_guid, e)
+
         return buf.getvalue()
 
     def _upload_file(self, data: bytes, filename: str) -> str:
+        """
+        Upload bytes to the server in chunks.
+        WSDL:
+          BeginChunkedFileUpload(string fileName, bool isZipped) -> Guid (fileIdAndSessionId)
+          AddNextFileChunk(string fileIdAndSessionId, byte[] fileData)
+          EndChunkedFileUpload(string fileIdAndSessionId)
+        """
         try:
-            file_guid = self._file_client.service.BeginChunkedFileUpload(
+            upload_session_id = self._file_client.service.BeginChunkedFileUpload(
                 fileName=filename,
                 isZipped=False,
                 _soapheaders=self._hdr(),
@@ -729,8 +698,7 @@ class MemoQProjectService:
         except Exception as e:
             raise RuntimeError(f"BeginChunkedFileUpload failed: {e}") from e
 
-        # Extract GUID if server returns a complex object
-        file_guid = _extract_guid(file_guid) or str(file_guid)
+        upload_session_id = _extract_guid(upload_session_id) or str(upload_session_id)
 
         view = memoryview(data)
         offset = 0
@@ -738,8 +706,8 @@ class MemoQProjectService:
             chunk = bytes(view[offset:offset + self.CHUNK_SIZE])
             try:
                 self._file_client.service.AddNextFileChunk(
-                    fileGuid=file_guid,
-                    fileChunk=chunk,
+                    fileIdAndSessionId=upload_session_id,
+                    fileData=chunk,
                     _soapheaders=self._hdr(),
                 )
             except Exception as e:
@@ -750,9 +718,9 @@ class MemoQProjectService:
 
         try:
             self._file_client.service.EndChunkedFileUpload(
-                fileGuid=file_guid, _soapheaders=self._hdr()
+                fileIdAndSessionId=upload_session_id, _soapheaders=self._hdr()
             )
         except Exception as e:
             raise RuntimeError(f"EndChunkedFileUpload failed: {e}") from e
 
-        return str(file_guid)
+        return str(upload_session_id)
