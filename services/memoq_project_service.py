@@ -82,8 +82,8 @@ class MemoQProjectService:
         timeout:   per-request timeout in seconds
     """
 
-    PROJECT_WSDL = "ServerProjectService.svc?wsdl"
-    FILEMGR_WSDL = "FileManagerService.svc?wsdl"
+    PROJECT_WSDL = "ServerProject?wsdl"
+    FILEMGR_WSDL = "FileManager?wsdl"
 
     # 500 KB chunks (memoQ recommends 100 KB - 1 MB)
     CHUNK_SIZE = 500 * 1024
