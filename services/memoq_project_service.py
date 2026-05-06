@@ -15,10 +15,11 @@ The memoQ WSAPI requires the API key inside the SOAP envelope header:
     <ApiKey xmlns="http://kilgray.com/memoqservices/2007">...</ApiKey>
 NOT in an HTTP Authorization header.
 
-Bilingual round-trip (V26+)
+Bilingual round-trip (V27+)
 --------------------------
-1. ExportBilingual(IncludeSkeleton=True, SaveCompressed=False) -> single .mqxliff
-   (skeleton embedded as base64 in <reference> header — self-contained for round-trip)
+1. ExportBilingual(IncludeSkeleton=False, SaveCompressed=False) -> plain .mqxliff
+   (no skeleton needed — server stores it internally; IncludeSkeleton=True would force
+   SaveCompressed=True which produces a ZIP, making direct round-trip impossible)
 2. (caller modifies the XLIFF, e.g. translation results, Verifika fixes)
 3. BeginChunkedFileUpload + AddNextFileChunk + EndChunkedFileUpload -> uploadFileGuid
 4. UpdateTranslationDocumentFromBilingual(projectGuid, uploadFileGuid, XLIFF)
@@ -391,44 +392,43 @@ class MemoQProjectService:
         self,
         project_guid: str,
         document_guid: str,
-        include_skeleton: bool = True,
+        include_skeleton: bool = False,
     ) -> Tuple[bytes, str]:
         """
-        Export the document as a bilingual XLIFF (runs silently in background).
+        Export the document as a bilingual XLIFF for round-trip editing.
 
         Returns (xliff_bytes, suggested_filename).
 
-        Uses the dedicated XLIFF bilingual export method.
-        WSDL signature (verified from server error messages):
-          ExportTranslationDocumentAsXliffBilingual(
-              serverProjectGuid: guid, docGuid: guid,
-              options: XliffBilingualExportOptions)
+        memoQ server constraint: IncludeSkeleton=True REQUIRES SaveCompressed=True
+        (the skeleton is always a separate file in the ZIP, never embedded in the XLIFF).
+        For UpdateTranslationDocumentFromBilingual the skeleton is NOT needed —
+        the server already has it internally.  So we use IncludeSkeleton=False,
+        SaveCompressed=False → plain single .mqxliff, directly uploadable.
 
         Strategies:
-          1. ExportTranslationDocumentAsXliffBilingual(options=zeep-factory-obj)
-          2. ExportTranslationDocument (generic fallback — may return original format)
+          1. ExportTranslationDocumentAsXliffBilingual(IncludeSkeleton=False, SaveCompressed=False)
+          2. ExportTranslationDocument (generic fallback)
         """
         file_guid: Optional[str] = None
         last_err: Optional[Exception] = None
 
-        # Build options object using zeep factory so field names are validated
-        # against the XSD schema. Fallback to dict if factory fails.
-        # WSDL signature: ExportTranslationDocumentAsXliffBilingual(
-        #     serverProjectGuid: guid, docGuid: guid,
-        #     options: XliffBilingualExportOptions)
+        # IncludeSkeleton=False, SaveCompressed=False  →  plain .mqxliff (no ZIP)
+        # memoQ enforces: IncludeSkeleton=True requires SaveCompressed=True
+        # For server-side UpdateTranslationDocumentFromBilingual the skeleton is
+        # NOT required — the server already stores it internally.
         try:
             opts_type = self._project_client.get_type(
                 '{http://kilgray.com/memoqservices/2007}XliffBilingualExportOptions'
             )
             opts_obj = opts_type(
-                IncludeSkeleton=include_skeleton,
-                SaveCompressed=False,   # False → single .mqxliff with skeleton embedded
+                IncludeSkeleton=False,
+                SaveCompressed=False,
                 FullVersionHistory=False,
             )
         except Exception as factory_err:
             logger.warning("XliffBilingualExportOptions factory failed: %s — using dict", factory_err)
             opts_obj = {
-                'IncludeSkeleton': include_skeleton,
+                'IncludeSkeleton': False,
                 'SaveCompressed': False,
                 'FullVersionHistory': False,
             }
