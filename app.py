@@ -1540,6 +1540,7 @@ with tab2:
                     key="update_translated_btn_results",
                 ):
                     with st.spinner("Pushing translated XLIFF to memoQ Server..."):
+                        _upd_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         try:
                             new_version = _proj_service.update_bilingual(
                                 _proj_guid, _doc_guid, final_xml,
@@ -1547,12 +1548,31 @@ with tab2:
                                     'last_xliff_filename', 'translated.mqxliff'
                                 ),
                             )
-                            if new_version is not None:
-                                st.success(f"✓ Updated in memoQ — new document version: {new_version}")
-                            else:
-                                st.success("✓ Updated in memoQ")
+                            _upd_msg = (
+                                f"✓ Updated in memoQ — version: {new_version}"
+                                if new_version is not None
+                                else "✓ Updated in memoQ"
+                            )
+                            st.success(_upd_msg)
+                            # Append to downloadable log
+                            _log_line = (
+                                f"\n{_upd_ts} | UPDATE OK — {_upd_msg} "
+                                f"| XLIFF size: {len(final_xml)} bytes\n"
+                            )
+                            st.session_state.translation_log = (
+                                st.session_state.get('translation_log', '') + _log_line
+                            )
                         except Exception as e:
-                            st.error(f"Failed to update in memoQ: {e}")
+                            _err_str = str(e)
+                            st.error(f"Failed to update in memoQ: {_err_str}")
+                            # Append error to downloadable log
+                            _log_line = (
+                                f"\n{_upd_ts} | UPDATE FAILED — {_err_str} "
+                                f"| XLIFF size: {len(final_xml)} bytes\n"
+                            )
+                            st.session_state.translation_log = (
+                                st.session_state.get('translation_log', '') + _log_line
+                            )
             else:
                 st.info("No source XLIFF in session — re-pick a document in the Workspace tab.")
 
