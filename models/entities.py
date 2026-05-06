@@ -15,6 +15,8 @@ class TranslationSegment:
     tag_map: Optional[dict] = None
     preceding_source: Optional[str] = None
     following_source: Optional[str] = None
+    match_rate: int = 0   # mq:percent from pretranslated XLIFF (0 = no match)
+    status: str = ""      # mq:status from pretranslated XLIFF
 
 
 @dataclass
