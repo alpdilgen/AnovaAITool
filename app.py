@@ -634,6 +634,66 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
 
     with st.status("Processing...", expanded=True) as status:
 
+        # 0. memoQ Analysis + Pretranslate → re-export with TM content
+        _proj_guid = st.session_state.get('memoq_selected_project_guid')
+        _doc_guid  = st.session_state.get('memoq_selected_document_guid')
+        _proj_svc  = st.session_state.get('memoq_project_service')
+
+        if _proj_svc and _proj_guid and _doc_guid and memoq_tm_guids:
+            # Analysis: show TM match distribution before starting LLM calls
+            st.write("📊 Running TM Analysis...")
+            try:
+                _astats = _proj_svc.run_analysis(_proj_guid, _doc_guid, tgt_code)
+                if _astats and _astats.get('total_segments', 0) > 0:
+                    _bypass_est = (_astats.get('hit_101', 0)
+                                   + _astats.get('hit_100', 0)
+                                   + _astats.get('hit_95_99', 0))
+                    _fuzzy_est  = (_astats.get('hit_85_94', 0)
+                                   + _astats.get('hit_75_84', 0)
+                                   + _astats.get('hit_50_74', 0))
+                    _llm_est    = _astats.get('no_match', 0)
+                    st.write(f"   📈 {_bypass_est} bypass (≥95%) | "
+                             f"{_fuzzy_est} fuzzy | {_llm_est} no-match")
+                    logger.log(
+                        f"memoQ Analysis — 101%={_astats.get('hit_101',0)}, "
+                        f"100%={_astats.get('hit_100',0)}, "
+                        f"95-99%={_astats.get('hit_95_99',0)}, "
+                        f"85-94%={_astats.get('hit_85_94',0)}, "
+                        f"75-84%={_astats.get('hit_75_84',0)}, "
+                        f"50-74%={_astats.get('hit_50_74',0)}, "
+                        f"no_match={_astats.get('no_match',0)}, "
+                        f"repetition={_astats.get('repetition',0)}"
+                    )
+            except Exception as _ae:
+                st.warning(f"Analysis failed (non-fatal): {_ae}")
+                logger.log(f"Analysis error: {_ae}")
+
+            # Pretranslate: fill TM matches into the document on memoQ Server
+            st.write("⚡ Pre-translating with TM...")
+            try:
+                _proj_svc.pretranslate_document(
+                    _proj_guid, _doc_guid, memoq_tm_guids, match_threshold
+                )
+                st.write("✅ Pre-translation complete")
+                logger.log(
+                    f"Pretranslate OK — GoodMatchRate={match_threshold}%, "
+                    f"TMs={memoq_tm_guids}"
+                )
+            except Exception as _pe:
+                st.warning(f"Pre-translation failed (non-fatal): {_pe}")
+                logger.log(f"Pretranslate error: {_pe}")
+
+            # Re-export: get XLIFF with TM content + mq:percent per segment
+            st.write("📤 Exporting pre-translated document...")
+            try:
+                xliff_bytes, _xfname = _proj_svc.export_bilingual(_proj_guid, _doc_guid)
+                st.session_state.last_xliff_bytes = xliff_bytes
+                st.write("✅ Document exported")
+                logger.log("Post-pretranslate re-export OK")
+            except Exception as _ee:
+                st.warning(f"Re-export failed — using original XLIFF: {_ee}")
+                logger.log(f"Re-export error: {_ee}")
+
         # 1. Parse XLIFF
         st.write("📄 Parsing XLIFF...")
         segments = XMLParser.parse_xliff(xliff_bytes)
@@ -716,72 +776,32 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
             else:
                 segments_needing_tm.append(seg)
 
-        # STEP B: memoQ Server TM batch lookup
+        # STEP B: Classify segments by mq:percent (set by pretranslate_document)
+        # memoQ's native engine filled the XLIFF; we read match rates back from it.
+        # Bypass targets stay in the XLIFF untouched — NOT added to final_translations.
         segments_for_memoq = [s for s in segments_needing_tm if s.id not in {s2.id for s2 in bypass_segments}]
 
-        BATCH_SIZE = batch_size
+        if segments_for_memoq:
+            from models.entities import TMMatch as _PTMMatch
+            for seg in segments_for_memoq:
+                if seg.match_rate >= acceptance_threshold:
+                    # High-confidence: keep pretranslated target in XLIFF as-is
+                    bypass_segments.append(seg)
+                    match_scores[seg.id] = seg.match_rate
+                elif seg.match_rate >= match_threshold:
+                    # Fuzzy: pretranslated target is TM suggestion for LLM reference
+                    tm_context[seg.id] = [_PTMMatch(
+                        source_text=seg.source,
+                        target_text=seg.target,
+                        similarity=seg.match_rate,
+                        match_type='FUZZY',
+                    )]
+                    match_scores[seg.id] = seg.match_rate
+                else:
+                    # No TM match (or match below threshold): LLM only
+                    match_scores[seg.id] = seg.match_rate or 0
 
-        # Build segment index for context lookup (preceding/following segments)
-        _seg_index_map = {seg.id: i for i, seg in enumerate(segments)}
-
-        def _build_context_for_batch(batch_segs):
-            """Build context_info list for a batch, using original segment order."""
-            ctx_list = []
-            for seg in batch_segs:
-                ctx = {}
-                orig_idx = _seg_index_map.get(seg.id)
-                if orig_idx is not None:
-                    if orig_idx > 0:
-                        prev_src = normalize_segment_for_matching(segments[orig_idx - 1].source)
-                        if prev_src:
-                            ctx["preceding"] = prev_src
-                    if orig_idx < len(segments) - 1:
-                        next_src = normalize_segment_for_matching(segments[orig_idx + 1].source)
-                        if next_src:
-                            ctx["following"] = next_src
-                ctx_list.append(ctx)
-            return ctx_list
-
-        if memoq_client and memoq_tm_guids and segments_for_memoq:
-            for tm_guid in memoq_tm_guids:
-                remaining = [s for s in segments_for_memoq if s.id not in {s2.id for s2 in bypass_segments} or s.id in tm_context]
-
-                for batch_start in range(0, len(remaining), BATCH_SIZE):
-                    batch = remaining[batch_start:batch_start + BATCH_SIZE]
-                    normalized_sources = [normalize_segment_for_matching(s.source) for s in batch]
-                    batch_context = _build_context_for_batch(batch)
-
-                    try:
-                        results = memoq_client.lookup_segments(
-                            tm_guid, normalized_sources,
-                            match_threshold=match_threshold,
-                            src_lang=src_code, tgt_lang=tgt_code,
-                            context_info=batch_context
-                        )
-
-                        if results:
-                            for idx, seg in enumerate(batch):
-                                if idx in results:
-                                    tm_hits = results[idx]
-                                    if tm_hits:
-                                        best_hit = tm_hits[0]
-                                        score = best_hit.similarity
-
-                                        if score >= acceptance_threshold:
-                                            bypass_segments.append(seg)
-                                            final_translations[seg.id] = best_hit.target_text
-                                            match_scores[seg.id] = score
-                                        elif score >= match_threshold:
-                                            # Only update if memoQ has better match than local TM
-                                            existing_score = match_scores.get(seg.id, 0)
-                                            if score > existing_score:
-                                                tm_context[seg.id] = tm_hits
-                                                match_scores[seg.id] = score
-                    except Exception as e:
-                        logger.log(f"memoQ TM batch lookup error: {e}")
-
-                    progress = 0.3 + (batch_start + len(batch)) / max(len(remaining), 1) * 0.3
-                    analysis_progress.progress(min(progress, 0.6))
+        analysis_progress.progress(0.6)
 
         # STEP D: Determine which segments go to LLM
         bypassed_ids = {s.id for s in bypass_segments}
@@ -986,7 +1006,9 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     still_bypassed.append(seg)
                     continue
 
-                tm_translation = final_translations.get(seg.id, '')
+                # Bypass target comes from memoQ pretranslate (in seg.target),
+                # not from final_translations (bypass segments are not in that dict).
+                tm_translation = seg.target or final_translations.get(seg.id, '')
                 tm_translation_lower = tm_translation.lower()
 
                 missing = []
@@ -1008,7 +1030,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                         match_type='FUZZY'
                     )
                     tm_context[seg.id] = [tm_hit]
-                    del final_translations[seg.id]
+                    final_translations.pop(seg.id, None)  # safe: bypass not in final_translations
                     llm_segments.append(seg)
                     tb_demoted += 1
                     logger.log(
