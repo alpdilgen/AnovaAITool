@@ -736,7 +736,8 @@ class MemoQProjectService:
             )
             opts = opts_type(
                 DocumentGuids=[doc_guid],
-                LanguageCodes=[tgt_lang_code],
+                # LanguageCodes omitted — memoQ analyses all target langs for the document;
+                # specifying a code that doesn't match exactly raises a server error.
                 RepetitionPreferenceOver100=False,
                 StoreReportInProject=False,
                 Note="",
