@@ -710,3 +710,184 @@ class MemoQProjectService:
             raise RuntimeError(f"EndChunkedFileUpload failed: {e}") from e
 
         return str(upload_session_id)
+
+    # ------------------------------------------------------------------ #
+    # TM Analysis                                                         #
+    # ------------------------------------------------------------------ #
+
+    def run_analysis(
+        self,
+        project_guid: str,
+        doc_guid: str,
+        tgt_lang_code: str,
+    ) -> dict:
+        """
+        Run TM analysis on a single document using memoQ's RunAnalysis SOAP method.
+
+        Returns a dict with segment counts per match level:
+          hit_101, hit_100, hit_95_99, hit_85_94, hit_75_84,
+          hit_50_74, no_match, repetition, total_segments
+
+        Returns empty dict on failure (non-fatal — caller should continue).
+        """
+        try:
+            opts_type = self._project_client.get_type(
+                '{http://kilgray.com/memoqservices/2007}AnalysisOptions'
+            )
+            opts = opts_type(
+                DocumentGuids=[doc_guid],
+                LanguageCodes=[tgt_lang_code],
+                RepetitionPreferenceOver100=False,
+                StoreReportInProject=False,
+                Note="",
+            )
+
+            result = self._project_client.service.RunAnalysis(
+                serverProjectGuid=project_guid,
+                options=opts,
+                _soapheaders=self._hdr(),
+            )
+
+            if result is None:
+                return {}
+
+            r = self._zeep_to_dict(result)
+
+            # ResultsForTargetLangs → list of AnalysisResultForLang
+            langs = r.get('ResultsForTargetLangs') or []
+            if isinstance(langs, dict):
+                langs = langs.get('AnalysisResultForLang') or []
+            if not isinstance(langs, list):
+                langs = [langs]
+
+            # Pick the entry matching tgt_lang_code; fall back to first
+            lang_entry = None
+            tgt_base = tgt_lang_code.lower().split('-')[0]
+            for lr in langs:
+                lrd = self._zeep_to_dict(lr) if not isinstance(lr, dict) else lr
+                code = str(lrd.get('TargetLangCode') or '').lower().split('-')[0]
+                if code == tgt_base:
+                    lang_entry = lrd
+                    break
+            if lang_entry is None and langs:
+                lang_entry = self._zeep_to_dict(langs[0]) if not isinstance(langs[0], dict) else langs[0]
+            if lang_entry is None:
+                return {}
+
+            summary = lang_entry.get('Summary') or {}
+            if not isinstance(summary, dict):
+                summary = self._zeep_to_dict(summary)
+
+            def _sc(key: str) -> int:
+                node = summary.get(key) or {}
+                if not isinstance(node, dict):
+                    node = self._zeep_to_dict(node)
+                try:
+                    return int(node.get('SegmentCount') or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            stats = {
+                'hit_101':        _sc('Hit101'),
+                'hit_100':        _sc('Hit100'),
+                'hit_95_99':      _sc('Hit95_99'),
+                'hit_85_94':      _sc('Hit85_94'),
+                'hit_75_84':      _sc('Hit75_84'),
+                'hit_50_74':      _sc('Hit50_74'),
+                'no_match':       _sc('NoMatch'),
+                'repetition':     _sc('Repetition'),
+                'total_segments': _sc('All'),
+            }
+            logger.info("RunAnalysis: %s", stats)
+            return stats
+
+        except Exception as e:
+            logger.warning("run_analysis failed: %s", e)
+            return {}
+
+    # ------------------------------------------------------------------ #
+    # Pretranslate                                                        #
+    # ------------------------------------------------------------------ #
+
+    def pretranslate_document(
+        self,
+        project_guid: str,
+        doc_guid: str,
+        tm_guids: List[str],
+        good_match_rate: int = 50,
+    ) -> bool:
+        """
+        Pre-translate a document using memoQ's PretranslateDocuments SOAP method.
+
+        Fills ALL TM matches >= good_match_rate into the document on the server.
+        Segments are marked as Pretranslated (not confirmed/locked) so they can
+        be overwritten when we import the corrected bilingual later.
+
+        After this call, export_bilingual() will return an XLIFF with:
+          - target content filled from TM for matched segments
+          - mq:percent attribute per segment reflecting the TM match rate
+          - mq:status="Pretranslated" for matched segments
+
+        Args:
+            project_guid:    server project GUID
+            doc_guid:        translation document GUID
+            tm_guids:        TM GUIDs to use (ResourceFilter); pass [] to use all project TMs
+            good_match_rate: minimum match rate to pretranslate (default 50)
+
+        Raises RuntimeError on SOAP failure.
+        """
+        try:
+            opts_type = self._project_client.get_type(
+                '{http://kilgray.com/memoqservices/2007}PretranslateOptions'
+            )
+            filter_type = self._project_client.get_type(
+                '{http://kilgray.com/memoqservices/2007}PreTransFilter'
+            )
+
+            # Build ResourceFilter.TMs — try a few zeep array formats
+            resource_filter = None
+            if tm_guids:
+                try:
+                    resource_filter = filter_type(TMs=tm_guids)
+                except Exception:
+                    try:
+                        resource_filter = filter_type(TMs={'guid': tm_guids})
+                    except Exception:
+                        resource_filter = None  # fall back: use all project TMs
+
+            opts_kwargs = dict(
+                GoodMatchRate=good_match_rate,
+                PretranslateLookupBehavior='AnyMatch',
+                UseMT=False,
+                LockPretranslated=False,
+                ConfirmLockPretranslated='None',
+                ConfirmLockUnambiguousMatchesOnly=False,
+                FinalTranslationState='Pretranslated',
+            )
+            if resource_filter is not None:
+                opts_kwargs['ResourceFilter'] = resource_filter
+
+            opts = opts_type(**opts_kwargs)
+
+            # Try passing doc GUIDs as a plain list first; fall back to wrapped form
+            try:
+                result = self._project_client.service.PretranslateDocuments(
+                    serverProjectGuid=project_guid,
+                    translationDocGuids=[doc_guid],
+                    options=opts,
+                    _soapheaders=self._hdr(),
+                )
+            except Exception as _e1:
+                logger.warning("PretranslateDocuments (list) failed: %s — retrying wrapped", _e1)
+                result = self._project_client.service.PretranslateDocuments(
+                    serverProjectGuid=project_guid,
+                    translationDocGuids={'guid': [doc_guid]},
+                    options=opts,
+                    _soapheaders=self._hdr(),
+                )
+
+            logger.info("PretranslateDocuments succeeded: %r", result)
+            return True
+
+        except Exception as e:
+            raise RuntimeError(f"pretranslate_document failed: {e}") from e
