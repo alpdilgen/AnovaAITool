@@ -15,13 +15,13 @@ The memoQ WSAPI requires the API key inside the SOAP envelope header:
     <ApiKey xmlns="http://kilgray.com/memoqservices/2007">...</ApiKey>
 NOT in an HTTP Authorization header.
 
-Bilingual round-trip (proven live, v1.10 -> v1.12)
---------------------------------------------------
-1. ExportBilingual(IncludeSkeleton=True, SaveCompressed=True) -> .mqxlz (ZIP)
-2. unzip in-memory -> document.mqxliff
-3. (caller modifies the XLIFF, e.g. translation results, Verifika fixes)
-4. BeginChunkedFileUpload + AddNextFileChunk + EndChunkedFileUpload -> uploadFileGuid
-5. UpdateTranslationDocumentFromBilingual(projectGuid, uploadFileGuid, XLIFF)
+Bilingual round-trip (V26+)
+--------------------------
+1. ExportBilingual(IncludeSkeleton=True, SaveCompressed=False) -> single .mqxliff
+   (skeleton embedded as base64 in <reference> header — self-contained for round-trip)
+2. (caller modifies the XLIFF, e.g. translation results, Verifika fixes)
+3. BeginChunkedFileUpload + AddNextFileChunk + EndChunkedFileUpload -> uploadFileGuid
+4. UpdateTranslationDocumentFromBilingual(projectGuid, uploadFileGuid, XLIFF)
 """
 
 from __future__ import annotations
@@ -422,14 +422,14 @@ class MemoQProjectService:
             )
             opts_obj = opts_type(
                 IncludeSkeleton=include_skeleton,
-                SaveCompressed=include_skeleton,
+                SaveCompressed=False,   # False → single .mqxliff with skeleton embedded
                 FullVersionHistory=False,
             )
         except Exception as factory_err:
             logger.warning("XliffBilingualExportOptions factory failed: %s — using dict", factory_err)
             opts_obj = {
                 'IncludeSkeleton': include_skeleton,
-                'SaveCompressed': include_skeleton,
+                'SaveCompressed': False,
                 'FullVersionHistory': False,
             }
 
@@ -549,7 +549,12 @@ class MemoQProjectService:
               BilingualDocFormat docFormat)
         Returns TranslationDocImportResultInfo[].
         """
+        logger.info(
+            "update_bilingual: uploading %d bytes as %s (project=%s)",
+            len(xliff_bytes), filename, project_guid,
+        )
         upload_guid = self._upload_file(xliff_bytes, filename=filename)
+        logger.info("update_bilingual: upload complete, fileGuid=%s", upload_guid)
 
         try:
             result = self._project_client.service.UpdateTranslationDocumentFromBilingual(
@@ -558,8 +563,9 @@ class MemoQProjectService:
                 docFormat="XLIFF",
                 _soapheaders=self._hdr(),
             )
-            logger.info("UpdateTranslationDocumentFromBilingual succeeded: %r", result)
+            logger.info("UpdateTranslationDocumentFromBilingual result: %r", result)
         except Exception as e:
+            logger.error("UpdateTranslationDocumentFromBilingual SOAP fault: %s", e)
             raise RuntimeError(
                 f"UpdateTranslationDocumentFromBilingual failed: {e}"
             ) from e
@@ -569,9 +575,11 @@ class MemoQProjectService:
             docs = self.list_documents(project_guid)
             for d in docs:
                 if str(d.get("DocumentGuid")) == str(document_guid):
-                    return d.get("Version")
-        except Exception:
-            pass
+                    ver = d.get("MajorVersion") or d.get("MinorVersion") or d.get("Version")
+                    logger.info("update_bilingual: new document version = %s", ver)
+                    return ver
+        except Exception as e:
+            logger.warning("update_bilingual: version read-back failed: %s", e)
         return None
 
     # ------------------------------------------------------------------ #
