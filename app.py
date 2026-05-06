@@ -634,6 +634,9 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
 
     with st.status("Processing...", expanded=True) as status:
 
+        # Logger initialized here so STEP 0 can log before segments are parsed
+        logger = TransactionLogger()
+
         # 0. memoQ Analysis + Pretranslate → re-export with TM content
         _proj_guid = st.session_state.get('memoq_selected_project_guid')
         _doc_guid  = st.session_state.get('memoq_selected_document_guid')
@@ -710,8 +713,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         st.session_state.segment_objects = {seg.id: seg for seg in segments}
         st.session_state.chat_history = []
 
-        # Initialize Logger
-        logger = TransactionLogger()
+        # Initialize Logger (already created above; log job start now that we have segment count)
         logger.log(f"Started translation job for {total_segments} segments.")
         logger.log(f"Source: {src_code} | Target: {tgt_code} | Model: {model}")
         logger.log(f"TM Acceptance: ≥{acceptance_threshold}% | TM Match: ≥{match_threshold}%")
