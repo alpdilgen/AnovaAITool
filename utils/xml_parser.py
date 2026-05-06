@@ -106,18 +106,31 @@ class XMLParser:
                 seg_id = trans_unit.get('id')
                 source_node = trans_unit.find("x:source", ns)
                 target_node = trans_unit.find("x:target", ns)
-                
+
+                # Read memoQ pretranslation attributes
+                # mq:percent = match rate set by PretranslateDocuments
+                # mq:status  = segment translation state
+                _mq_pct = (trans_unit.get('{MQXliff}percent', '')
+                           or trans_unit.get('{MQXliff}match-rate', ''))
+                try:
+                    match_rate = int(_mq_pct) if _mq_pct and str(_mq_pct).strip().isdigit() else 0
+                except (ValueError, TypeError):
+                    match_rate = 0
+                mq_status = trans_unit.get('{MQXliff}status', '')
+
                 if source_node is not None:
                     source_text, tag_map = XMLParser._extract_text_with_tags(source_node)
                     target_text = ""
                     if target_node is not None:
-                         target_text = "".join(target_node.itertext())
+                        target_text = "".join(target_node.itertext())
 
                     segments.append(TranslationSegment(
                         id=seg_id,
                         source=source_text,
                         target=target_text,
-                        tag_map=tag_map
+                        tag_map=tag_map,
+                        match_rate=match_rate,
+                        status=mq_status,
                     ))
             return segments
         except Exception as e:
