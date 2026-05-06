@@ -30,6 +30,10 @@ if 'tm_info' not in st.session_state:
     st.session_state.tm_info = None
 if 'bypass_stats' not in st.session_state:
     st.session_state.bypass_stats = {'bypassed': 0, 'llm_sent': 0}
+if 'translation_done' not in st.session_state:
+    st.session_state.translation_done = False
+if 'bypass_translations' not in st.session_state:
+    st.session_state.bypass_translations = {}
 if 'detected_languages' not in st.session_state:
     st.session_state.detected_languages = {'source': None, 'target': None}
 if 'chat_history' not in st.session_state:
@@ -1054,6 +1058,10 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
             'llm_sent': len(llm_segments),
             'total_segments': total_segments
         }
+        # Store bypass translations for Tab 2 preview (plain text, for display only)
+        st.session_state.bypass_translations = {
+            seg.id: seg.target for seg in bypass_segments if seg.target
+        }
 
         st.write(f"✅ **{len(bypass_segments)}** segments from TM (≥{acceptance_threshold}% match)")
         st.write(f"🔄 **{len(llm_segments)}** segments need LLM translation")
@@ -1259,6 +1267,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         logger.log("="*80 + "\n")
 
         st.session_state.translation_log = logger.get_content()
+        st.session_state.translation_done = True
 
         status.update(label="✅ Translation Complete!", state="complete")
 
@@ -1491,7 +1500,7 @@ with tab1:
                 st.error("Pick a memoQ project and document first.")
 
     # --- Analysis results shown inline after translation completes ---
-    if st.session_state.translation_results:
+    if st.session_state.get('translation_done'):
         _analysis = _compute_analysis()
         if _analysis:
             st.divider()
@@ -1499,12 +1508,14 @@ with tab1:
 
 # === TAB 2: RESULTS ===
 with tab2:
-    if st.session_state.translation_results:
+    # Show results whenever a translation job has completed — including all-TM runs
+    # where translation_results may be empty (0 LLM segments).
+    if st.session_state.get('translation_done') and st.session_state.get('last_xliff_bytes'):
         st.subheader("Translation Output")
 
         col_stat1, col_stat2, col_stat3 = st.columns(3)
         with col_stat1:
-            st.metric("Total Segments", st.session_state.bypass_stats.get('total_segments', len(st.session_state.translation_results)))
+            st.metric("Total Segments", st.session_state.bypass_stats.get('total_segments', 0))
         with col_stat2:
             bypassed = st.session_state.bypass_stats.get('bypassed', 0)
             st.metric(f"From TM (≥{acceptance_threshold}%)", bypassed)
@@ -1517,64 +1528,61 @@ with tab2:
 
         with col_res1:
             _src_xliff = st.session_state.get('last_xliff_bytes')
-            if _src_xliff:
-                final_xml = XMLParser.update_xliff(
-                    _src_xliff,
-                    st.session_state.translation_results,
-                    st.session_state.get('segment_objects', {}),
-                    match_scores=st.session_state.get('segment_match_scores', {})
-                )
+            # update_xliff with empty translation_results returns the pretranslated
+            # XLIFF unchanged — correct behaviour for all-TM runs.
+            final_xml = XMLParser.update_xliff(
+                _src_xliff,
+                st.session_state.translation_results,
+                st.session_state.get('segment_objects', {}),
+                match_scores=st.session_state.get('segment_match_scores', {})
+            )
 
-                # Cache the rebuilt XLIFF so other tabs (Verifika) can re-use it
-                st.session_state.translated_xliff_bytes = final_xml
+            # Cache the rebuilt XLIFF so other tabs (Verifika) can re-use it
+            st.session_state.translated_xliff_bytes = final_xml
 
-                _proj_guid = st.session_state.get('memoq_selected_project_guid')
-                _doc_guid = st.session_state.get('memoq_selected_document_guid')
-                _proj_service = st.session_state.get('memoq_project_service')
+            _proj_guid = st.session_state.get('memoq_selected_project_guid')
+            _doc_guid = st.session_state.get('memoq_selected_document_guid')
+            _proj_service = st.session_state.get('memoq_project_service')
 
-                if st.button(
-                    "🔄 Update translated file in memoQ",
-                    type="primary",
-                    width="stretch",
-                    disabled=not (_proj_guid and _doc_guid and _proj_service),
-                    key="update_translated_btn_results",
-                ):
-                    with st.spinner("Pushing translated XLIFF to memoQ Server..."):
-                        _upd_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        try:
-                            new_version = _proj_service.update_bilingual(
-                                _proj_guid, _doc_guid, final_xml,
-                                filename=st.session_state.get(
-                                    'last_xliff_filename', 'translated.mqxliff'
-                                ),
-                            )
-                            _upd_msg = (
-                                f"✓ Updated in memoQ — version: {new_version}"
-                                if new_version is not None
-                                else "✓ Updated in memoQ"
-                            )
-                            st.success(_upd_msg)
-                            # Append to downloadable log
-                            _log_line = (
-                                f"\n{_upd_ts} | UPDATE OK — {_upd_msg} "
-                                f"| XLIFF size: {len(final_xml)} bytes\n"
-                            )
-                            st.session_state.translation_log = (
-                                st.session_state.get('translation_log', '') + _log_line
-                            )
-                        except Exception as e:
-                            _err_str = str(e)
-                            st.error(f"Failed to update in memoQ: {_err_str}")
-                            # Append error to downloadable log
-                            _log_line = (
-                                f"\n{_upd_ts} | UPDATE FAILED — {_err_str} "
-                                f"| XLIFF size: {len(final_xml)} bytes\n"
-                            )
-                            st.session_state.translation_log = (
-                                st.session_state.get('translation_log', '') + _log_line
-                            )
-            else:
-                st.info("No source XLIFF in session — re-pick a document in the Workspace tab.")
+            if st.button(
+                "🔄 Update translated file in memoQ",
+                type="primary",
+                width="stretch",
+                disabled=not (_proj_guid and _doc_guid and _proj_service),
+                key="update_translated_btn_results",
+            ):
+                with st.spinner("Pushing translated XLIFF to memoQ Server..."):
+                    _upd_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        new_version = _proj_service.update_bilingual(
+                            _proj_guid, _doc_guid, final_xml,
+                            filename=st.session_state.get(
+                                'last_xliff_filename', 'translated.mqxliff'
+                            ),
+                        )
+                        _upd_msg = (
+                            f"✓ Updated in memoQ — version: {new_version}"
+                            if new_version is not None
+                            else "✓ Updated in memoQ"
+                        )
+                        st.success(_upd_msg)
+                        _log_line = (
+                            f"\n{_upd_ts} | UPDATE OK — {_upd_msg} "
+                            f"| XLIFF size: {len(final_xml)} bytes\n"
+                        )
+                        st.session_state.translation_log = (
+                            st.session_state.get('translation_log', '') + _log_line
+                        )
+                    except Exception as e:
+                        _err_str = str(e)
+                        st.error(f"Failed to update in memoQ: {_err_str}")
+                        _log_line = (
+                            f"\n{_upd_ts} | UPDATE FAILED — {_err_str} "
+                            f"| XLIFF size: {len(final_xml)} bytes\n"
+                        )
+                        st.session_state.translation_log = (
+                            st.session_state.get('translation_log', '') + _log_line
+                        )
 
         with col_res2:
             if st.session_state.translation_log:
@@ -1589,18 +1597,28 @@ with tab2:
         st.divider()
         st.subheader("Preview")
 
+        # Merge bypass translations (plain text, display only) with LLM translations
+        _bypass_trans = st.session_state.get('bypass_translations', {})
+        _llm_trans = st.session_state.translation_results
+        _all_trans = {**_bypass_trans, **_llm_trans}  # LLM overwrites if overlap
+
         preview_data = []
-        for seg_id, trans in st.session_state.translation_results.items():
+        for seg_id, trans in _all_trans.items():
             seg_obj = st.session_state.segment_objects.get(seg_id)
             source = seg_obj.source if seg_obj else "N/A"
+            score = st.session_state.get('segment_match_scores', {}).get(seg_id, 0)
+            src_short = source[:60] + '...' if len(source) > 60 else source
+            tgt_short = trans[:60] + '...' if len(trans) > 60 else trans
             preview_data.append({
                 'ID': seg_id,
-                'Source': source[:50] + '...' if len(source) > 50 else source,
-                'Translation': trans[:50] + '...' if len(trans) > 50 else trans
+                'Match%': int(score),
+                'Source': src_short,
+                'Translation': tgt_short,
             })
 
-        df = pd.DataFrame(preview_data)
-        st.dataframe(df, width="stretch")
+        if preview_data:
+            df = pd.DataFrame(preview_data)
+            st.dataframe(df, width="stretch")
 
         # --- TM Analysis ---
         _tab2_analysis = _compute_analysis()
@@ -1608,7 +1626,6 @@ with tab2:
             st.divider()
             st.subheader("📊 TM Match Analysis")
             show_analysis_screen(_tab2_analysis)
-
 
     else:
         st.info("No results yet. Run translation in Workspace tab.")
