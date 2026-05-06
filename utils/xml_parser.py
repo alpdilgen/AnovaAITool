@@ -226,31 +226,46 @@ class XMLParser:
                 output_str = output_str.replace(f'{wrong_prefix}:', 'mq:')
                 output_str = output_str.replace(f'xmlns:{wrong_prefix}', 'xmlns:mq')
 
-        # Apply memoQ metadata for all translated segments
+        # LLM-translated segments → Pretranslated (shows as "Edited" — needs human review)
         for seg_id in translations.keys():
             score = match_scores.get(seg_id, 0)
             output_str = XMLParser._add_memoq_metadata_to_segment(
-                output_str, seg_id, int(score)
+                output_str, seg_id, int(score), mq_status_override="Pretranslated"
             )
+
+        # Bypass segments (TM ≥95%, not touched in translations) → ManuallyConfirmed
+        # Their target content was set by memoQ pretranslate; we only update the state.
+        for seg_id, score in (match_scores or {}).items():
+            if seg_id not in translations and int(score) >= 95:
+                output_str = XMLParser._add_memoq_metadata_to_segment(
+                    output_str, seg_id, int(score), mq_status_override="ManuallyConfirmed"
+                )
 
         final_output = f'<?xml version="1.0" encoding="UTF-8"?>\n{output_str}'
         return final_output.encode('utf-8')
 
     @staticmethod
-    def _add_memoq_metadata_to_segment(xml_str: str, seg_id: str, match_score: int) -> str:
+    def _add_memoq_metadata_to_segment(
+        xml_str: str,
+        seg_id: str,
+        match_score: int,
+        mq_status_override: str = None,
+    ) -> str:
         """
         Add memoQ metadata to a specific trans-unit using surgical string replacements.
 
-        memoQ status logic:
-            - match >= 95%: mq:status="ManuallyConfirmed" (TM Match - confirmed)
-            - match < 95%: mq:status="PartiallyEdited" (Fuzzy/LLM - needs review)
+        mq_status_override: caller-supplied state; falls back to score-based default.
+          "ManuallyConfirmed" → TM bypass (≥95%) — shows as Confirmed in memoQ
+          "Pretranslated"     → LLM segments     — shows as Edited in memoQ
         """
         timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # Always use ManuallyConfirmed — memoQ's UpdateTranslationDocumentFromBilingual
-        # silently ignores segments whose mq:status is "PartiallyEdited" or lower;
-        # only ManuallyConfirmed / Pretranslated cause the target to be applied.
-        mq_status = "ManuallyConfirmed"
+        if mq_status_override:
+            mq_status = mq_status_override
+        elif match_score >= 95:
+            mq_status = "ManuallyConfirmed"
+        else:
+            mq_status = "Pretranslated"
 
         # Find the specific trans-unit opening tag for this seg_id
         pattern = rf'(<trans-unit\s[^>]*?\bid="{re.escape(seg_id)}"[^>]*?)>'
