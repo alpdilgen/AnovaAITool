@@ -6,7 +6,7 @@ import copy
 from datetime import datetime
 
 class XMLParser:
-    
+
     @staticmethod
     def detect_languages(content: bytes) -> Tuple[Optional[str], Optional[str]]:
         """Detect source and target languages from XLIFF file."""
@@ -18,50 +18,50 @@ class XMLParser:
                     break
                 except:
                     continue
-            
+
             if not xml_str:
                 return None, None
-            
+
             root = ET.fromstring(xml_str)
             ns = {'x': 'urn:oasis:names:tc:xliff:document:1.2'}
-            
+
             file_elem = root.find('.//x:file', ns)
             if file_elem is None:
                 file_elem = root.find('.//file')
             if file_elem is None:
                 file_elem = root
-            
+
             source_lang = file_elem.get('source-language')
             target_lang = file_elem.get('target-language')
-            
+
             if source_lang:
                 source_lang = source_lang.lower()
             if target_lang:
                 target_lang = target_lang.lower()
-            
+
             return source_lang, target_lang
-            
+
         except Exception as e:
             print(f"Language detection error: {e}")
             return None, None
-    
+
     @staticmethod
     def _extract_text_with_tags(element) -> Tuple[str, Dict[str, ET.Element]]:
         """Convert XML element's mixed content into string with placeholders."""
         tag_map = {}
         tag_counter = 1
         text_content = element.text if element.text else ""
-        
+
         for child in list(element):
             placeholder = f"{{{{{tag_counter}}}}}"
             tag_copy = copy.deepcopy(child)
-            tag_copy.tail = None 
+            tag_copy.tail = None
             tag_map[placeholder] = tag_copy
             text_content += placeholder
             if child.tail:
                 text_content += child.tail
             tag_counter += 1
-            
+
         return text_content, tag_map
 
     @staticmethod
@@ -69,10 +69,10 @@ class XMLParser:
         """Reconstruct XML structure from string with {{n}} placeholders."""
         parts = re.split(r'(\{\{\d+\}\})', translated_text)
         last_element = None
-        
+
         for part in parts:
             if not part: continue
-            
+
             if re.match(r'^\{\{\d+\}\}$', part):
                 if part in tag_map:
                     new_tag = copy.deepcopy(tag_map[part])
@@ -95,13 +95,13 @@ class XMLParser:
         try:
             ET.register_namespace('', "urn:oasis:names:tc:xliff:document:1.2")
             ET.register_namespace('mq', "MQXliff")
-            
+
             tree = ET.ElementTree(ET.fromstring(content))
             root = tree.getroot()
             segments = []
-            
+
             ns = {'x': 'urn:oasis:names:tc:xliff:document:1.2', 'mq': 'MQXliff'}
-            
+
             for trans_unit in root.findall(".//x:trans-unit", ns):
                 seg_id = trans_unit.get('id')
                 source_node = trans_unit.find("x:source", ns)
@@ -148,28 +148,32 @@ class XMLParser:
         """
         Update XLIFF with translations and memoQ metadata.
 
-        Args:
-            original_content: Original XLIFF content as bytes
-            translations: Dict of segment_id -> translated text
-            segments_map: Dict of segment_id -> TranslationSegment objects
-            match_rates: Legacy parameter (deprecated, use match_scores)
-            match_scores: Dict of segment_id -> match percentage (0-101+)
+        Preserves all original namespace declarations by pre-registering them
+        before ET parses the document — prevents ET from mangling memoQ-specific
+        namespace prefixes (e.g. mq2, or any other xmlns:xxx declarations).
 
         memoQ metadata logic:
             - match >= 95%: mq:status="ManuallyConfirmed", mq:percent=score
             - match < 95%: mq:status="PartiallyEdited", mq:percent=score
         """
+        # --- Pre-register ALL namespace declarations from source document ---
+        # This prevents ET from renaming unknown prefixes to ns0, ns1, etc.
+        # which would break memoQ's namespace-sensitive XML parser.
+        try:
+            _head = original_content[:8192].decode('utf-8', errors='replace')
+            for _pfx, _uri in re.findall(r'xmlns:(\w+)="([^"]+)"', _head):
+                try:
+                    ET.register_namespace(_pfx, _uri)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         ET.register_namespace('', "urn:oasis:names:tc:xliff:document:1.2")
         ET.register_namespace('mq', "MQXliff")
 
         # Safe default for match_scores
         if match_scores is None:
             match_scores = {}
-
-        # DEBUG: Log received match_scores
-        print(f"DEBUG update_xliff: Received {len(match_scores)} match scores")
-        if match_scores:
-            print(f"DEBUG: First 3 entries: {list(match_scores.items())[:3]}")
 
         # Merge legacy match_rates into match_scores if provided
         if match_rates:
@@ -207,13 +211,13 @@ class XMLParser:
         # Convert to string
         output_str = ET.tostring(root, encoding='unicode')
 
-        # Fix namespaces
+        # Fix namespaces — ensure mq: prefix is correct for MQXliff namespace
         if 'xmlns:mq="MQXliff"' not in output_str:
             output_str = output_str.replace('<xliff ', '<xliff xmlns:mq="MQXliff" ')
 
-        match = re.search(r'xmlns:(\w+)="MQXliff"', output_str)
-        if match:
-            wrong_prefix = match.group(1)
+        mq_ns_match = re.search(r'xmlns:(\w+)="MQXliff"', output_str)
+        if mq_ns_match:
+            wrong_prefix = mq_ns_match.group(1)
             if wrong_prefix != 'mq':
                 output_str = output_str.replace(f'{wrong_prefix}:', 'mq:')
                 output_str = output_str.replace(f'xmlns:{wrong_prefix}', 'xmlns:mq')
@@ -233,11 +237,6 @@ class XMLParser:
         """
         Add memoQ metadata to a specific trans-unit using surgical string replacements.
 
-        Args:
-            xml_str: The XML content as string
-            seg_id: Segment ID to update
-            match_score: Match percentage (0-101+)
-
         memoQ status logic:
             - match >= 95%: mq:status="ManuallyConfirmed" (TM Match - confirmed)
             - match < 95%: mq:status="PartiallyEdited" (Fuzzy/LLM - needs review)
@@ -251,7 +250,6 @@ class XMLParser:
             mq_status = "PartiallyEdited"
 
         # Find the specific trans-unit opening tag for this seg_id
-        # Use \b (word boundary) instead of \s before id= to handle id being first or later attribute
         pattern = rf'(<trans-unit\s[^>]*?\bid="{re.escape(seg_id)}"[^>]*?)>'
 
         def modify_opening_tag(match):
@@ -310,13 +308,6 @@ class XMLParser:
             )
 
             return opening_tag + '>'
-
-        # DEBUG: Check if pattern matches
-        match_found = re.search(pattern, xml_str)
-        if match_found:
-            print(f"DEBUG: Pattern MATCHED for seg_id={seg_id}, applying mq:status={mq_status}, mq:percent={match_score}")
-        else:
-            print(f"DEBUG: Pattern NOT MATCHED for seg_id={seg_id}! Pattern: {pattern[:80]}...")
 
         xml_str = re.sub(pattern, modify_opening_tag, xml_str)
 
