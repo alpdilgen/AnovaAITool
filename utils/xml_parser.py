@@ -196,6 +196,10 @@ class XMLParser:
                 if target is None:
                     target = ET.SubElement(trans_unit, "{urn:oasis:names:tc:xliff:document:1.2}target")
 
+                # Mark as translated so memoQ's bilingual import applies the content.
+                # Without state="translated", memoQ may ignore the target on import.
+                target.set('state', 'translated')
+
                 target.text = None
                 for child in list(target):
                     target.remove(child)
@@ -243,11 +247,10 @@ class XMLParser:
         """
         timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # Determine memoQ status based on match score
-        if match_score >= 95:
-            mq_status = "ManuallyConfirmed"
-        else:
-            mq_status = "PartiallyEdited"
+        # Always use ManuallyConfirmed — memoQ's UpdateTranslationDocumentFromBilingual
+        # silently ignores segments whose mq:status is "PartiallyEdited" or lower;
+        # only ManuallyConfirmed / Pretranslated cause the target to be applied.
+        mq_status = "ManuallyConfirmed"
 
         # Find the specific trans-unit opening tag for this seg_id
         pattern = rf'(<trans-unit\s[^>]*?\bid="{re.escape(seg_id)}"[^>]*?)>'
