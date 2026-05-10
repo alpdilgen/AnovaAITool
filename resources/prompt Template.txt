@@ -46,8 +46,6 @@ UQL(w)
 FS
 FS(n)
 FS(w)
-Trash
-Dust
 PES
 PA
 CO
@@ -56,11 +54,6 @@ PAN
 LI
 SE
 EL
-OK
-Cancel
-Enter
-Escape
-Admin
 ERP
 ERP-ID
 R²
